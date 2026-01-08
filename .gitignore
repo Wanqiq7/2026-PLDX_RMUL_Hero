@@ -1,0 +1,91 @@
+# 说明：该目录包含多个子工程（嵌入式 Chassis/Gimbal + 视觉 AutoAim）。
+# 目标：仅忽略“可再生 / 环境相关 / 运行时产物”，不忽略工程源代码与文档资源。
+
+# ===== 系统杂项 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# ===== 临时文件 / 备份 =====
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+*.old
+*.orig
+
+# ===== 编辑器 / IDE =====
+.vscode/
+.idea/
+.vs/
+*.code-workspace
+*.iml
+
+# ===== Serena / Codex / Claude 等工具缓存 =====
+.serena/
+**/.serena/
+.codex/
+**/.codex/
+.claude/
+**/.claude/
+**/.cache/
+
+# ===== CMake / 构建目录 =====
+**/build/
+**/cmake-build-*/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/install_manifest.txt
+**/CMakeUserPresets.json
+**/.ninja_deps
+**/.ninja_log
+
+# ===== 编译产物（C/C++/嵌入式） =====
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.elf
+*.hex
+*.bin
+*.map
+*.d
+*.dep
+*.lst
+*.su
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.tlog
+*.VC.db
+*.VC.VC.opendb
+
+# ===== 编译数据库（clangd 等工具常用） =====
+compile_commands.json
+**/compile_commands.json
+
+# ===== Python / 脚本运行产物（AutoAim 工具链可能用到） =====
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+.venv/
+venv/
+
+# ===== 运行时数据（常见：日志/录制/相机 SDK 日志） =====
+**/logs/
+**/records/
+**/records_*/
+**/records-*/
+**/MvSdkLog/
+
+# ===== 防止误提交嵌套仓库元数据 =====
+**/.git/
+**/.git
