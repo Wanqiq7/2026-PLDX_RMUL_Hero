@@ -1,6 +1,8 @@
 #include "chassis.h"
+#include "VOFA.h"
 #include "arm_math.h"
 #include "bsp_dwt.h"
+#include "bsp_usart.h"
 #include "controller.h"
 #include "dji_motor.h"
 #include "general_def.h"
@@ -86,8 +88,8 @@ static void ChassisSystemIDSwitch() {
 static const Chassis_Runtime_Config_t chassis_config = {
     .rc =
         {
-            .max_linear_speed = 3.0f, // m/s - 最大线速度
-            .max_angular_speed = 5.0f // rad/s - 最大角速度
+            .max_linear_speed = 4.0f, // m/s - 最大线速度
+            .max_angular_speed = 6.0f // rad/s - 最大角速度
         },
     .force =
         {
@@ -102,8 +104,8 @@ static const Chassis_Runtime_Config_t chassis_config = {
     .kinematics = {
         .velocity_lpf_alpha = 0.85f, // 速度估算滤波系数
         .speed_deadband = 25.0f,     // 速度死区阈值 (deg/s)
-        .follow_lpf_alpha = 0.6f,    // 跟随模式滤波系数
-        .rotate_speed = 6.0f         // 小陀螺模式旋转速度 (rad/s)
+        .follow_lpf_alpha = 0.95f,   // 跟随模式滤波系数
+        .rotate_speed = 3.0f         // 小陀螺模式旋转速度 (rad/s)
     }};
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体
@@ -126,6 +128,40 @@ static Referee_Interactive_info_t
     ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
 
 static SuperCapInstance *cap; // 超级电容
+
+#if POWER_CONTROLLER_ENABLE
+static USARTInstance *vofa_usart = NULL;
+static uint8_t vofa_tx_buf[32];
+static VofaJustFloatSender_s vofa_sender;
+
+static uint8_t VofaUsartIsReady(void *ctx) {
+  USARTInstance *ins = (USARTInstance *)ctx;
+  if (ins == NULL || ins->usart_handle == NULL) {
+    return 0;
+  }
+
+  return (ins->usart_handle->gState == HAL_UART_STATE_READY) ? 1 : 0;
+}
+
+static void VofaUsartSend(void *ctx, uint8_t *buf, uint16_t len,
+                          VofaTransferMode_e mode) {
+  USART_TRANSFER_MODE bsp_mode = USART_TRANSFER_DMA;
+  switch (mode) {
+  case VOFA_TRANSFER_BLOCKING:
+    bsp_mode = USART_TRANSFER_BLOCKING;
+    break;
+  case VOFA_TRANSFER_IT:
+    bsp_mode = USART_TRANSFER_IT;
+    break;
+  case VOFA_TRANSFER_DMA:
+  default:
+    bsp_mode = USART_TRANSFER_DMA;
+    break;
+  }
+
+  USARTSend((USARTInstance *)ctx, buf, len, bsp_mode);
+}
+#endif
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb,
     *motor_rb; // left right forward back
 
@@ -210,6 +246,26 @@ void ChassisInit() {
       }};
   cap = SuperCapInit(&cap_conf); // 超级电容初始化
 
+#if POWER_CONTROLLER_ENABLE
+  // VOFA+ JustFloat：用于将超级电容实时功率发送到上位机
+  // 注意：USARTRegister() 会启动 DMA 接收，因此 recv_buff_size 不能为 0
+  // 串口选择原则：避免与遥控器/裁判系统/视觉等已占用串口冲突
+  USART_Init_Config_s vofa_usart_conf = {
+      .recv_buff_size = 1,
+      .usart_handle = &huart1,
+      .module_callback = NULL,
+  };
+  vofa_usart = USARTRegister(&vofa_usart_conf);
+
+  vofa_sender.ctx = vofa_usart;
+  vofa_sender.is_ready = VofaUsartIsReady;
+  vofa_sender.send = VofaUsartSend;
+  vofa_sender.tx_buf = vofa_tx_buf;
+  vofa_sender.tx_buf_len = (uint16_t)sizeof(vofa_tx_buf);
+  vofa_sender.max_channels = 1;
+  vofa_sender.transfer_mode = VOFA_TRANSFER_DMA;
+#endif
+
   // 发布订阅初始化,如果为双板,则需要can comm来传递消息
 #ifdef CHASSIS_BOARD
   Chassis_IMU_data = INS_Init(); // 底盘IMU初始化
@@ -248,14 +304,17 @@ void ChassisInit() {
   // 底盘跟随云台PID控制器初始化（统一力控：输出角速度）
   // 注意：输出单位为角速度（rad/s），后续通过力控PID转换为扭矩
   PID_Init_Config_s follow_pid_config = {
-      .Kp = 0.25f,               // 单位：(rad/s)/度（角度误差→角速度）
-      .Ki = 0.0f,                // 积分增益（可选开启）
-      .Kd = 0.0f,                // 微分增益（暂不使用）
-      .Derivative_LPF_RC = 0.0f, // 不使用微分滤波
-      .IntegralLimit = 0.0f,     // 积分限幅：1 rad/s
-      .MaxOut = 3.6f,            // 最大输出：5 rad/s（底盘旋转角速度）
-      .DeadBand = 1.58f,         // 死区：0.25度（静止时更稳定）
-      .Improve = PID_Integral_Limit | PID_Derivative_On_Measurement,
+      .Kp = 0.45f, // 单位：(rad/s)/度（角度误差→角速度）
+      .Ki = 0.0f,  // 积分增益（可选开启）
+      .Kd = 0.04f, // 微分增益
+      // 微分低通滤波时间常数RC（秒）
+      // RobotTask周期约2ms(500Hz)，取微分截止频率fc≈20Hz：
+      // RC = 1/(2πfc) ≈ 1/(2π·20) ≈ 0.00796s
+      .Derivative_LPF_RC = 0.008f,
+      .IntegralLimit = 0.0f, // 积分限幅：1 rad/s
+      .MaxOut = 5.5f,        // 最大输出：5 rad/s（底盘旋转角速度）
+      .DeadBand = 1.58f,     // 死区：0.25度（静止时更稳定）
+      .Improve = PID_Derivative_On_Measurement | PID_DerivativeFilter,
   };
   PIDInit(&chassis_follow_pid, &follow_pid_config);
 
@@ -288,12 +347,11 @@ void ChassisInit() {
 
   // 旋转扭矩PID初始化 (输出单位: N·m) - 优化参数减少振荡
   PID_Init_Config_s torque_pid_config = {
-      .Kp = 2.5f,             // 比例增益 [N·m/(rad/s)] - 从2.5降至1.5减少过冲
-      .Ki = 0.0f,             // 积分增益 [N·m/rad]
-      .Kd = 0.0f,             // 微分增益 [N·m·s/rad] - 增加阻尼抑制振荡
-      .IntegralLimit = 50.0f, // 积分限幅 [N·m]
-      .MaxOut = 5.0f,
-      .DeadBand = 0.1f, // 死区 [rad/s] - 修复：从0.15增至0.3，减少回位后震荡
+      .Kp = 8.0f, // 比例增益 [N·m/(rad/s)] - 从2.5降至1.5减少过冲
+      .Ki = 0.0f, // 积分增益 [N·m/rad]
+      .Kd = 0.1f, // 微分增益 [N·m·s/rad] - 增加阻尼抑制振荡
+      .MaxOut = 6.0f,
+      .DeadBand = 0.04f, // 死区 [rad/s] - 修复：从0.15增至0.3，减少回位后震荡
       .Output_LPF_RC = 0.00087f,
       .Improve = PID_OutputFilter | PID_Derivative_On_Measurement,
   };
@@ -369,7 +427,7 @@ static void MecanumKinematicsCalculate() {
  * 公式说明：
  *   vx = (-vlf - vrf + vlb + vrb) / 4
  *   vy = (-vlf + vrf - vlb + vrb) / 4
- *   wz = (vlf - vrf - vlb + vrb) / (4×r)
+ *   wz = (vlf + vrf + vlb + vrb) / (4×r)
  *   其中 r = sqrt( (L/2)² + (W/2)² )
  */
 static void EstimateChassisVelocity(void) {
@@ -395,7 +453,7 @@ static void EstimateChassisVelocity(void) {
   float instant_vy =
       (-lf_linear_vel + rf_linear_vel - lb_linear_vel + rb_linear_vel) * inv_4;
   float instant_wz =
-      (lf_linear_vel - rf_linear_vel - lb_linear_vel + rb_linear_vel) /
+      (lf_linear_vel + rf_linear_vel + lb_linear_vel + rb_linear_vel) /
       (4.0f * rotation_radius);
 
   /* ===== 第三步：低通滤波平滑噪声 ===== */
@@ -647,10 +705,9 @@ void ChassisTask() {
     float follow_angular_vel = -PIDCalculate(
         &chassis_follow_pid, chassis_cmd_recv.near_center_error, 0.0f);
 
-    // 一阶滤波器平滑（修复：使用全局静态变量，不再重复定义）
-    chassis_cmd_recv.wz = LowPassFilter_Float(
-        follow_angular_vel, chassis_config.kinematics.follow_lpf_alpha,
-        &last_follow_wz);
+    // 直接输出目标角速度（取消一阶滤波）
+    chassis_cmd_recv.wz = follow_angular_vel;
+    last_follow_wz = chassis_cmd_recv.wz;
     // wz统一为角速度（rad/s），后续通过chassis_torque_pid转换为扭矩
     break;
   }
@@ -698,6 +755,17 @@ void ChassisTask() {
   // 4. 功率限制（必须在发送电机指令前执行）
   // 4.1 获取超级电容数据
   SuperCap_Rx_Data_s cap_rx_data = SuperCapGetData(cap);
+
+  // 4.1.1 通过 VOFA 上位机实时发送超级电容反馈功率（W）
+  // 说明：VOFA 走 DMA/IT
+  // 时不建议在高频控制环里“每次都发”，否则会打断上一次发送或占满带宽
+  static float last_vofa_send_s = 0.0f;
+  float now_s = DWT_GetTimeline_s();
+  if ((now_s - last_vofa_send_s) >= 0.05f) { // 20Hz
+    float vofa_values[1] = {cap_rx_data.chassis_power};
+    (void)VofaJustFloatSend(&vofa_sender, vofa_values, 1);
+    last_vofa_send_s = now_s;
+  }
 
   // 4.2 更新功率控制器数据（暂时无裁判系统，使用超级电容数据）
   // 手动设定功率限制（根据实际测试调整，单位：W）

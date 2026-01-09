@@ -1,0 +1,27 @@
+// 帧头控制数据, 2B
+uint8_t Frame_Header;
+Enum_Manifold_Aiming_Priority : uint8_t Aiming_Priority;
+
+// 云台电机数据, 16B
+float Gimbal_Motor_Angle_Yaw;
+float Gimbal_Motor_Angle_Pitch;
+float Gimbal_Motor_Omega_Yaw;
+float Gimbal_Motor_Omega_Pitch;
+
+// 云台相对Odom数据, 20B
+float Gimbal_Angle_Yaw;
+float Gimbal_Angle_Pitch;
+float Gimbal_Angle_Roll;
+float Gimbal_Velocity_X;
+float Gimbal_Velocity_Y;
+
+// 云台IMU源数据, 24B
+float Gimbal_IMU_Omega_X;
+float Gimbal_IMU_Omega_Y;
+float Gimbal_IMU_Omega_Z;
+float Gimbal_IMU_Accel_X;
+float Gimbal_IMU_Accel_Y;
+float Gimbal_IMU_Accel_Z;
+
+// 帧尾, 1B
+uint8_t Frame_Rear;

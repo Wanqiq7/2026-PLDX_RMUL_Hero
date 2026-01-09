@@ -102,8 +102,8 @@ void GimbalInit() {
           {
               .LQR =
                   {
-                      .K_angle = 88.602540f,
-                      .K_velocity = 14.177862f,
+                      .K_angle = 345.0f,
+                      .K_velocity = 24.0f,
                       .K_integral = 0.0f,
                       .max_out = 20.0f,
                       .enable_integral = 0,
@@ -197,7 +197,7 @@ void GimbalTask() {
   case GIMBAL_ZERO_FORCE: {
     DJIMotorStop(yaw_motor);
     DMMotorStop(pitch_motor);
-    damiao_pitch_gravity_ff = 0.0f;
+    damiao_pitch_gravity_ff = 0.0fs;
     break;
   }
   case GIMBAL_GYRO_MODE: {

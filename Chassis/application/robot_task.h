@@ -102,9 +102,10 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument) {
     motor_start = DWT_GetTimeline_ms();
     MotorControlTask();
     motor_dt = DWT_GetTimeline_ms() - motor_start;
-    if (motor_dt > 5)
+    // 500Hz: 2ms周期
+    if (motor_dt > 2)
       LOGERROR("[freeRTOS] MOTOR Task is being DELAY! dt = [%f]", &motor_dt);
-    osDelay(5);
+    osDelay(2);
   }
 }
 
@@ -129,15 +130,16 @@ __attribute__((noreturn)) void StartROBOTTASK(void const *argument) {
   static float robot_dt;
   static float robot_start;
   LOGINFO("[freeRTOS] ROBOT core Task Start");
-  // 200Hz-500Hz,若有额外的控制任务如平衡步兵可能需要提升至1kHz
+  // 1kHz：底盘控制任务提升至1ms周期
   for (;;) {
     robot_start = DWT_GetTimeline_ms();
     RobotTask();
     robot_dt = DWT_GetTimeline_ms() - robot_start;
-    if (robot_dt > 2)
+    // 1kHz: 1ms周期
+    if (robot_dt > 1)
       LOGERROR("[freeRTOS] ROBOT core Task is being DELAY! dt = [%f]",
                &robot_dt);
-    osDelay(2); // 500Hz: 2ms周期
+    osDelay(1); // 1kHz: 1ms周期
   }
 }
 

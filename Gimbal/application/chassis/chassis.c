@@ -449,14 +449,9 @@ void ChassisTask() {
     float pid_output = -PIDCalculate(&chassis_follow_pid,
                                      chassis_cmd_recv.near_center_error, 0.0f);
 
-    // 使用一阶低通滤波器平滑过渡,避免突变
-    // K值说明：K越小滤波越强(保持原有运动状态更多)，K越大响应越快
-    // 推荐值: 0.2~0.4
-    // - 小陀螺切换时建议用0.2(保持更多旋转动量)
-    // - 静止跟随时可以用0.3-0.4(响应更快)
-    float filter_K = 0.25f; // 可根据实际调试
-    chassis_cmd_recv.wz =
-        LowPassFilter_Float(pid_output, filter_K, &last_follow_wz);
+    // 直接输出目标角速度（取消一阶滤波）
+    chassis_cmd_recv.wz = pid_output;
+    last_follow_wz = chassis_cmd_recv.wz;
     break;
   }
 
