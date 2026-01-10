@@ -129,6 +129,13 @@ void PIDInit(PIDInstance *pid, PID_Init_Config_s *config);
  */
 float PIDCalculate(PIDInstance *pid, float measure, float ref);
 
+/**
+ * @brief 重置PID内部状态（清除积分与历史量）
+ *
+ * @param pid PID实例指针
+ */
+void PIDReset(PIDInstance *pid);
+
 /* SMC滑模控制器结构体 */
 typedef struct {
   //---------------------------------- init config block
@@ -201,6 +208,7 @@ typedef struct {
 
   // improve parameter
   uint8_t enable_integral;   // 是否启用积分项
+  uint8_t enable_angle_wrap; // 是否启用角度误差归一化到[-π, π]（速度等非角度量请置0）
   float integral_limit;      // 积分限幅
   float integral_deadband;   // 积分死区 [rad]
   float integral_decay_coef; // 积分衰减系数 (变增益积分)

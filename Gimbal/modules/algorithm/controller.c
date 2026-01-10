@@ -124,6 +124,31 @@ void PIDInit(PIDInstance *pid, PID_Init_Config_s *config) {
   DWT_GetDeltaT(&pid->DWT_CNT);
 }
 
+void PIDReset(PIDInstance *pid) {
+  pid->Measure = 0.0f;
+  pid->Last_Measure = 0.0f;
+  pid->Err = 0.0f;
+  pid->Last_Err = 0.0f;
+  pid->Last_ITerm = 0.0f;
+
+  pid->Pout = 0.0f;
+  pid->Iout = 0.0f;
+  pid->Dout = 0.0f;
+  pid->ITerm = 0.0f;
+
+  pid->Output = 0.0f;
+  pid->Last_Output = 0.0f;
+  pid->Last_Dout = 0.0f;
+
+  pid->Ref = 0.0f;
+  pid->dt = 0.0f;
+  pid->ERRORHandler.ERRORCount = 0;
+  pid->ERRORHandler.ERRORType = PID_ERROR_NONE;
+
+  // 重置时间计数器，避免下一次dt异常
+  DWT_GetDeltaT(&pid->DWT_CNT);
+}
+
 /**
  * @brief          PID计算
  * @param[in]      PID结构体
@@ -314,6 +339,7 @@ void LQRInit(LQRInstance *lqr, LQR_Init_Config_s *config) {
   lqr->max_out = config->max_out;
 
   lqr->enable_integral = config->enable_integral;
+  lqr->enable_angle_wrap = 1; // 默认按角度误差处理（归一化到[-π, π]）
   lqr->integral_limit = config->integral_limit;
   lqr->integral_deadband = config->integral_deadband;
   lqr->integral_decay_coef = config->integral_decay_coef;
@@ -357,11 +383,14 @@ float LQRCalculate(LQRInstance *lqr, float measure_angle, float measure_vel,
   lqr->angle_error = lqr->ref - lqr->measure_angle;
 
   // 角度误差归一化 (处理角度跳变，如从-π到+π)
-  while (lqr->angle_error > PI) {
-    lqr->angle_error -= 2.0f * PI;
-  }
-  while (lqr->angle_error < -PI) {
-    lqr->angle_error += 2.0f * PI;
+  // 对速度等非角度量使用LQR时，应关闭该功能（enable_angle_wrap=0）
+  if (lqr->enable_angle_wrap) {
+    while (lqr->angle_error > PI) {
+      lqr->angle_error -= 2.0f * PI;
+    }
+    while (lqr->angle_error < -PI) {
+      lqr->angle_error += 2.0f * PI;
+    }
   }
 
   // ===== LQR状态反馈控制律 =====

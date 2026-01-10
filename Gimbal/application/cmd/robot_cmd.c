@@ -132,7 +132,7 @@ void RobotCMDInit() {
   gimbal_cmd_send.pitch_vel_ff = 0.0f;
   gimbal_cmd_send.pitch_acc_ff = 0.0f;
 
-  // ⭐ 初始化发射模块控制指令
+  // 初始化发射模块控制指令
   shoot_cmd_send.shoot_mode = SHOOT_ON;        // 发射模块使能
   shoot_cmd_send.friction_mode = FRICTION_OFF; // 摩擦轮默认关闭
   shoot_cmd_send.load_mode = LOAD_STOP;        // 拨盘默认停止
@@ -140,7 +140,7 @@ void RobotCMDInit() {
   shoot_cmd_send.shoot_rate = 1.0f;            // 默认射频1发/秒（英雄用）
   shoot_cmd_send.lid_mode = LID_CLOSE;         // 默认弹舱盖关闭
 
-  // ⭐ 初始化视觉控制指令
+  // 初始化视觉控制指令
   vision_cmd_send.vision_mode = VISION_MODE_OFF; // 默认关闭视觉控制
   vision_cmd_send.allow_auto_fire = 0;           // 默认禁止自动射击
   vision_cmd_send.manual_yaw_offset = 0.0f;      // 无手动微调
@@ -255,10 +255,6 @@ static void RemoteControlSet() {
   float vy_norm = (float)rc_data[TEMP].rc.rocker_l1 / 660.0f;
   float vx_norm = (float)rc_data[TEMP].rc.rocker_l_ / 660.0f;
 
-  // ✅ 优化的低通滤波参数
-  // 原参数α=0.85，截止频率约62.8Hz（200Hz采样）
-  // 新参数α=0.90，截止频率约83.9Hz，提升响应速度同时过滤噪声
-  // 数学计算：fc = -fs·ln(1-α)/(2π)，其中fs=200Hz
   vx_filtered = LowPassFilter_Float(vx_norm, 0.90f, &vx_filtered);
   vy_filtered = LowPassFilter_Float(vy_norm, 0.90f, &vy_filtered);
 
@@ -278,11 +274,6 @@ static void RemoteControlSet() {
   float pitch_increment =
       pitch_norm / 180.0f * M_PI; // 归一化刻度直接视为弧度增量
 
-  // ✅ 优化的云台控制滤波参数
-  // Yaw轴：原参数α=0.98，截止频率约156Hz（响应过慢）
-  // 新参数α=0.95，截止频率约98.9Hz，提升响应速度
-  // Pitch轴：保持α=0.93，截止频率约85.3Hz，避免高频抖动
-  // 数学依据：截止频率 fc = -200·ln(1-α)/(2π)
   yaw_increment =
       LowPassFilter_Float(yaw_increment, 0.95f, &yaw_increment_filtered);
   pitch_increment =
@@ -318,8 +309,8 @@ static void RemoteControlSet() {
     // vision_cmd_send.vision_mode = VISION_MODE_AUTO_AIM; // ⭐ 启用自瞄
     // vision_cmd_send.allow_auto_fire = 1;                // ⭐
     // 授权视觉控制射击
-    //  如果需要连发测试速度环，改为：
-    shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+    // 单发：角度环（每次拨盘转过“一发角度”）
+    shoot_cmd_send.load_mode = LOAD_1_BULLET;
   }
 }
 

@@ -36,7 +36,7 @@
 #define PITCH_GRAVITY_K 0.0f
 #define PITCH_GRAVITY_GAMMA_DEG 0.0f
 // 发射参数
-#define REDUCTION_RATIO_LOADER 19.0f // M3508拨盘电机的减速比
+#define REDUCTION_RATIO_LOADER 51.0f // M3508拨盘电机减速箱减速比（51:1）
 #define LOAD_ANGLE_PER_BULLET 60     // 拨盘输出轴每发弹丸转动角度（机械设计值）
 #define ONE_BULLET_DELTA_ANGLE                                                 \
   (LOAD_ANGLE_PER_BULLET *                                                     \

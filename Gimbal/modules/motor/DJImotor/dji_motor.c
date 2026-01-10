@@ -258,7 +258,14 @@ void DJIMotorChangeFeed(DJIMotorInstance *motor, Closeloop_Type_e loop,
         "[dji_motor] loop type error, check memory access and func param"); // 检查是否传入了正确的LOOP类型,或发生了指针越界
 }
 
-void DJIMotorStop(DJIMotorInstance *motor) { motor->stop_flag = MOTOR_STOP; }
+void DJIMotorStop(DJIMotorInstance *motor) {
+  motor->stop_flag = MOTOR_STOP;
+
+  // 停止电机时重置PID状态，避免停机期间积分累积导致再次使能时冲击
+  PIDReset(&motor->motor_controller.current_PID);
+  PIDReset(&motor->motor_controller.speed_PID);
+  PIDReset(&motor->motor_controller.angle_PID);
+}
 
 void DJIMotorEnable(DJIMotorInstance *motor) {
   motor->stop_flag = MOTOR_ENALBED;
@@ -266,7 +273,17 @@ void DJIMotorEnable(DJIMotorInstance *motor) {
 
 /* 修改电机的实际闭环对象 */
 void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop) {
+  if (motor->motor_settings.outer_loop_type == outer_loop)
+    return;
+
   motor->motor_settings.outer_loop_type = outer_loop;
+
+  // 切换外环时重置对应PID状态，避免长时间未调用导致dt异常或积分残留
+  if (outer_loop == ANGLE_LOOP) {
+    PIDReset(&motor->motor_controller.angle_PID);
+  } else if (outer_loop == SPEED_LOOP) {
+    PIDReset(&motor->motor_controller.speed_PID);
+  }
 }
 
 /* 切换电机控制器类型（PID或LQR） */
@@ -305,6 +322,14 @@ void DJIMotorControl() {
     pid_ref =
         motor_controller
             ->pid_ref; // 保存设定值,防止motor_controller->pid_ref在计算过程中被修改
+
+    // 若电机处于停止状态：不计算控制器，直接清零输出，避免停机期间积分累积
+    if (motor->stop_flag == MOTOR_STOP) {
+      group = motor->sender_group;
+      num = motor->message_num;
+      memset(sender_assignment[group].tx_buff + 2 * num, 0, sizeof(uint16_t));
+      continue;
+    }
 
     // ==================== LQR控制器分支 ====================
     if (motor_setting->controller_type == CONTROLLER_LQR) {
@@ -406,10 +431,6 @@ void DJIMotorControl() {
     sender_assignment[group].tx_buff[2 * num] = (uint8_t)(set >> 8); // 低八位
     sender_assignment[group].tx_buff[2 * num + 1] =
         (uint8_t)(set & 0x00ff); // 高八位
-
-    // 若该电机处于停止状态,直接将buff置零
-    if (motor->stop_flag == MOTOR_STOP)
-      memset(sender_assignment[group].tx_buff + 2 * num, 0, sizeof(uint16_t));
   }
 
   // 遍历flag,检查是否要发送这一帧报文

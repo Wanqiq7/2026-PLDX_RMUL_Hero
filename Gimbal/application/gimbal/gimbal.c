@@ -102,7 +102,7 @@ void GimbalInit() {
           {
               .LQR =
                   {
-                      .K_angle = 345.0f,
+                      .K_angle = 324.0f,
                       .K_velocity = 24.0f,
                       .K_integral = 0.0f,
                       .max_out = 20.0f,
@@ -131,22 +131,6 @@ void GimbalInit() {
               .can_handle = &hcan2,
               .tx_id = 0x01,
               .rx_id = 0x11,
-          },
-      .controller_param_init_config =
-          {
-              .angle_PID =
-                  {
-                      .Kp = 1.0f,
-                      .Ki = 0.0f,
-                      .Kd = 0.1f,
-                      .MaxOut = 8.0f,
-                      .DeadBand = 0.01f,
-                      .Improve = PID_DerivativeFilter | PID_Integral_Limit,
-                      .IntegralLimit = 3.0f,
-                      .Derivative_LPF_RC = 0.05f,
-                  },
-              .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
-              .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[0],
           },
       .controller_setting_init_config =
           {
@@ -197,7 +181,7 @@ void GimbalTask() {
   case GIMBAL_ZERO_FORCE: {
     DJIMotorStop(yaw_motor);
     DMMotorStop(pitch_motor);
-    damiao_pitch_gravity_ff = 0.0fs;
+    damiao_pitch_gravity_ff = 0.0;
     break;
   }
   case GIMBAL_GYRO_MODE: {
