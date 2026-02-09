@@ -97,3 +97,7 @@ RM2024-PowerModule-main/
 robowalker2024bottominfantry-main/
 CLAUDE.md
 **/CLAUDE.md
+
+# ===== Vision 内部构建缓存（避免仓库膨胀） =====
+Vision/Hero_Vision/build_old_sp_cache/
+Vision/Hero_Vision/build_prev_from_build_local/
