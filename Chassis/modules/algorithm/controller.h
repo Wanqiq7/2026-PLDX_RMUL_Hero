@@ -53,9 +53,9 @@ typedef struct {
 typedef struct {
   //---------------------------------- init config block
   // config parameter
-  float Kp;
-  float Ki;
-  float Kd;
+  float kp;
+  float ki;
+  float kd;
   float MaxOut;
   float DeadBand;
 
@@ -96,9 +96,9 @@ typedef struct {
 typedef struct // config parameter
 {
   // basic parameter
-  float Kp;
-  float Ki;
-  float Kd;
+  float kp;
+  float ki;
+  float kd;
   float MaxOut;   // 输出限幅
   float DeadBand; // 死区
 

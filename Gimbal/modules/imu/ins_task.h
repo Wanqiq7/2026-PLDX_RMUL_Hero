@@ -36,6 +36,7 @@ typedef struct {
 
   // 新增：弧度制数据（供LQR等控制器使用，避免重复转换）
   float Pitch_rad;         // Pitch角度 [弧度]
+  float YawAngle_rad;      // Yaw单圈角度 [弧度]（范围通常为(-pi, pi]）
   float YawTotalAngle_rad; // Yaw总角度 [弧度]
 } attitude_t; // 最终解算得到的角度,以及yaw转动的总角度(方便多圈控制)
 
@@ -67,6 +68,7 @@ typedef struct {
 
   // 新增：弧度制数据（供LQR等控制器使用，避免重复转换）
   float Pitch_rad;         // Pitch角度 [弧度]
+  float YawAngle_rad;      // Yaw单圈角度 [弧度]（范围通常为(-pi, pi]）
   float YawTotalAngle_rad; // Yaw总角度 [弧度]
 
   uint8_t init;

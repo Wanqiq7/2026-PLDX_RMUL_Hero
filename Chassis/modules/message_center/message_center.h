@@ -54,7 +54,7 @@ typedef struct ent
  * @param data_len 消息长度,通过sizeof()获取
  * @return Subscriber_t* 返回订阅者实例
  */
-Subscriber_t *SubRegister(char *name, uint8_t data_len);
+Subscriber_t *RegisterSubscriber(char *name, uint8_t data_len);
 
 /**
  * @brief 注册成为消息发布者
@@ -62,7 +62,7 @@ Subscriber_t *SubRegister(char *name, uint8_t data_len);
  * @param name 发布者发布的话题名称(话题)
  * @return Publisher_t* 返回发布者实例
  */
-Publisher_t *PubRegister(char *name, uint8_t data_len);
+Publisher_t *RegisterPublisher(char *name, uint8_t data_len);
 
 /**
  * @brief 获取消息

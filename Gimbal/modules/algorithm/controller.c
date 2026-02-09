@@ -17,17 +17,17 @@
 // 梯形积分
 static void f_Trapezoid_Intergral(PIDInstance *pid) {
   // 计算梯形的面积,(上底+下底)*高/2
-  pid->ITerm = pid->Ki * ((pid->Err + pid->Last_Err) / 2) * pid->dt;
+  pid->ITerm = pid->ki * ((pid->Err + pid->Last_Err) / 2) * pid->dt;
 }
 
 // 变速积分(误差小时积分作用更强)
 static void f_Changing_Integration_Rate(PIDInstance *pid) {
   if (pid->Err * pid->Iout > 0) {
     // 积分呈累积趋势
-    if (abs(pid->Err) <= pid->CoefB)
+    if (fabsf(pid->Err) <= pid->CoefB)
       return; // Full integral
-    if (abs(pid->Err) <= (pid->CoefA + pid->CoefB))
-      pid->ITerm *= (pid->CoefA - abs(pid->Err) + pid->CoefB) / pid->CoefA;
+    if (fabsf(pid->Err) <= (pid->CoefA + pid->CoefB))
+      pid->ITerm *= (pid->CoefA - fabsf(pid->Err) + pid->CoefB) / pid->CoefA;
     else // 最大阈值,不使用积分
       pid->ITerm = 0;
   }
@@ -35,10 +35,10 @@ static void f_Changing_Integration_Rate(PIDInstance *pid) {
 
 // 积分限幅
 static void f_Integral_Limit(PIDInstance *pid) {
-  static float temp_Output, temp_Iout;
+  float temp_Output, temp_Iout;
   temp_Iout = pid->Iout + pid->ITerm;
   temp_Output = pid->Pout + pid->Iout + pid->Dout;
-  if (abs(temp_Output) > pid->MaxOut) {
+  if (fabsf(temp_Output) > pid->MaxOut) {
     if (pid->Err * pid->Iout > 0) // 积分却还在累积
     {
       pid->ITerm = 0; // 当前积分项置零
@@ -57,7 +57,7 @@ static void f_Integral_Limit(PIDInstance *pid) {
 
 // 微分先行(仅使用反馈值而不计参考输入的微分)
 static void f_Derivative_On_Measurement(PIDInstance *pid) {
-  pid->Dout = pid->Kd * (pid->Last_Measure - pid->Measure) / pid->dt;
+  pid->Dout = pid->kd * (pid->Last_Measure - pid->Measure) / pid->dt;
 }
 
 // 微分滤波(采集微分时,滤除高频噪声)
@@ -170,11 +170,11 @@ float PIDCalculate(PIDInstance *pid, float measure, float ref) {
   pid->Err = pid->Ref - pid->Measure;
 
   // 如果在死区外,则计算PID
-  if (abs(pid->Err) > pid->DeadBand) {
+  if (fabsf(pid->Err) > pid->DeadBand) {
     // 基本的pid计算,使用位置式
-    pid->Pout = pid->Kp * pid->Err;
-    pid->ITerm = pid->Ki * pid->Err * pid->dt;
-    pid->Dout = pid->Kd * (pid->Err - pid->Last_Err) / pid->dt;
+    pid->Pout = pid->kp * pid->Err;
+    pid->ITerm = pid->ki * pid->Err * pid->dt;
+    pid->Dout = pid->kd * (pid->Err - pid->Last_Err) / pid->dt;
 
     // 梯形积分
     if (pid->Improve & PID_Trapezoid_Intergral)
@@ -233,6 +233,7 @@ void SMCInit(SMCInstance *smc, SMC_Init_Config_s *config) {
   smc->k2 = config->k2;
   smc->alpha = config->alpha;
   smc->beta = config->beta;
+  smc->epsilon = config->epsilon > 0.0f ? config->epsilon : 0.1f; // 默认0.1
   smc->max_out = config->max_out;
   smc->feedforward_k1 = config->feedforward_k1;
   smc->feedforward_k2 = config->feedforward_k2;
@@ -286,7 +287,7 @@ float SMCCalculate(SMCInstance *smc, float measure, float measure_vel,
   // 趋近律控制项: reaching_law = alpha*s + beta*sgn(s)
   // 使用连续的符号函数以减小抖振
   float sgn_s;
-  float epsilon = 0.1f; // 边界层厚度
+  float epsilon = smc->epsilon; // 边界层厚度
   if (fabsf(smc->sliding_surface) < epsilon) {
     sgn_s = smc->sliding_surface / epsilon; // 边界层内线性化
   } else {
@@ -306,6 +307,38 @@ float SMCCalculate(SMCInstance *smc, float measure, float measure_vel,
   }
 
   return smc->output;
+}
+
+/**
+ * @brief 重置SMC滑模控制器状态
+ *
+ * @param smc SMC实例指针
+ *
+ * @note  在以下情况建议调用此函数:
+ *        - 切换控制模式时
+ *        - 电机失能后重新启用时
+ *        - 检测到异常需要清除历史状态时
+ */
+void SMCReset(SMCInstance *smc) {
+  if (smc == NULL) {
+    return;
+  }
+
+  smc->ref = 0.0f;
+  smc->last_ref = 0.0f;
+  smc->last_last_ref = 0.0f;
+  smc->measure = 0.0f;
+  smc->measure_vel = 0.0f;
+
+  smc->error = 0.0f;
+  smc->error_dot = 0.0f;
+  smc->sliding_surface = 0.0f;
+
+  smc->output = 0.0f;
+  smc->dt = 0.0f;
+
+  // 重置时间计数器，避免下一次dt异常
+  DWT_GetDeltaT(&smc->DWT_CNT);
 }
 
 /* ----------------------------下面是LQR控制器的实现----------------------------
@@ -343,6 +376,9 @@ void LQRInit(LQRInstance *lqr, LQR_Init_Config_s *config) {
   lqr->integral_limit = config->integral_limit;
   lqr->integral_deadband = config->integral_deadband;
   lqr->integral_decay_coef = config->integral_decay_coef;
+  lqr->integral_decay_threshold =
+      config->integral_decay_threshold > 0.0f ? config->integral_decay_threshold
+                                              : 0.3f; // 默认0.3rad（约17度）
 
   // 初始化时间计数器
   DWT_GetDeltaT(&lqr->DWT_CNT);
@@ -414,7 +450,7 @@ float LQRCalculate(LQRInstance *lqr, float measure_angle, float measure_vel,
         // 当积分与误差同号时(累积趋势)，根据误差大小衰减积分增量
         if (lqr->angle_error * lqr->integral > 0) {
           float decay = lqr->integral_decay_coef;
-          if (fabsf(lqr->angle_error) > 0.3f) { // 约17度
+          if (fabsf(lqr->angle_error) > lqr->integral_decay_threshold) {
             integral_term *= (1.0f - decay);
           }
         }

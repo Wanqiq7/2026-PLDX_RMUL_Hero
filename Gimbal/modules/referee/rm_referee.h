@@ -3,11 +3,49 @@
 
 #include "usart.h"
 #include "referee_protocol.h"
-#include "robot_def.h"
 #include "bsp_usart.h"
 #include "FreeRTOS.h"
 
 extern uint8_t UI_Seq;
+
+/* -------------------------UI专用枚举定义（Module层）------------------------- */
+// 底盘模式（UI显示用）
+typedef enum {
+  UI_CHASSIS_ZERO_FORCE = 0,    // 电流零输入
+  UI_CHASSIS_ROTATE,            // 小陀螺模式
+  UI_CHASSIS_NO_FOLLOW,         // 不跟随
+  UI_CHASSIS_FOLLOW_GIMBAL_YAW, // 跟随模式
+} ui_chassis_mode_e;
+
+// 云台模式（UI显示用）
+typedef enum {
+  UI_GIMBAL_ZERO_FORCE = 0, // 电流零输入
+  UI_GIMBAL_FREE_MODE,      // 自由模式
+  UI_GIMBAL_GYRO_MODE,      // 陀螺仪模式
+} ui_gimbal_mode_e;
+
+// 发射模式（UI显示用）
+typedef enum {
+  UI_SHOOT_OFF = 0,
+  UI_SHOOT_ON,
+} ui_shoot_mode_e;
+
+// 摩擦轮模式（UI显示用）
+typedef enum {
+  UI_FRICTION_OFF = 0,
+  UI_FRICTION_ON,
+} ui_friction_mode_e;
+
+// 弹舱盖模式（UI显示用）
+typedef enum {
+  UI_LID_OPEN = 0,
+  UI_LID_CLOSE,
+} ui_lid_mode_e;
+
+// 功率数据（UI显示用）
+typedef struct {
+  float chassis_power_mx;
+} UI_Chassis_Power_Data_s;
 
 #pragma pack(1)
 typedef struct
@@ -61,20 +99,20 @@ typedef struct
 {
 	Referee_Interactive_Flag_t Referee_Interactive_Flag;
 	// 为UI绘制以及交互数据所用
-	chassis_mode_e chassis_mode;			 // 底盘模式
-	gimbal_mode_e gimbal_mode;				 // 云台模式
-	shoot_mode_e shoot_mode;				 // 发射模式设置
-	friction_mode_e friction_mode;			 // 摩擦轮关闭
-	lid_mode_e lid_mode;					 // 弹舱盖打开
-	Chassis_Power_Data_s Chassis_Power_Data; // 功率控制
+	ui_chassis_mode_e chassis_mode;			 // 底盘模式
+	ui_gimbal_mode_e gimbal_mode;				 // 云台模式
+	ui_shoot_mode_e shoot_mode;				 // 发射模式设置
+	ui_friction_mode_e friction_mode;			 // 摩擦轮关闭
+	ui_lid_mode_e lid_mode;					 // 弹舱盖打开
+	UI_Chassis_Power_Data_s Chassis_Power_Data; // 功率控制
 
 	// 上一次的模式，用于flag判断
-	chassis_mode_e chassis_last_mode;
-	gimbal_mode_e gimbal_last_mode;
-	shoot_mode_e shoot_last_mode;
-	friction_mode_e friction_last_mode;
-	lid_mode_e lid_last_mode;
-	Chassis_Power_Data_s Chassis_last_Power_Data;
+	ui_chassis_mode_e chassis_last_mode;
+	ui_gimbal_mode_e gimbal_last_mode;
+	ui_shoot_mode_e shoot_last_mode;
+	ui_friction_mode_e friction_last_mode;
+	ui_lid_mode_e lid_last_mode;
+	UI_Chassis_Power_Data_s Chassis_last_Power_Data;
 
 } Referee_Interactive_info_t;
 

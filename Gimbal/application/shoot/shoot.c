@@ -50,9 +50,9 @@ void ShootInit() // 已适配三摩擦轮发射机构（倒三角布局）
           {
               .speed_PID =
                   {
-                      .Kp = 4.0f,
-                      .Ki = 0.0f, // 纯P控制：不启用积分
-                      .Kd = 0.08f,
+                      .kp = 4.0f,
+                      .ki = 0.0f, // 纯P控制：不启用积分
+                      .kd = 0.08f,
                       .Derivative_LPF_RC = 0.008f,
                       // 输出滤波：一阶低通时间常数（单位：秒），500Hz控制频率下推荐
                       // 0.01s
@@ -103,9 +103,9 @@ void ShootInit() // 已适配三摩擦轮发射机构（倒三角布局）
                   {
                       // 位置环：输出到速度环的目标速度（单位：度/秒）
                       // ⚠️ 注意：误差=3060°（考虑了减速比），不是60°
-                      .Kp = 17.5f, // P项（误差3060°→输出约5049°/s，接近MaxOut）
-                      .Ki = 0.0f,  // I项消除稳态误差
-                      .Kd = 0.05f,
+                      .kp = 17.5f, // P项（误差3060°→输出约5049°/s，接近MaxOut）
+                      .ki = 0.0f,  // I项消除稳态误差
+                      .kd = 0.05f,
                       .Improve = PID_Integral_Limit,
                       .MaxOut = 6000, // 最大目标速度6000°/s
                   },
@@ -113,9 +113,9 @@ void ShootInit() // 已适配三摩擦轮发射机构（倒三角布局）
                   {
                       // 无电流环模式：速度环直接输出CAN控制指令（等效电流/力矩类控制量）
                       // 输出单位：控制指令（范围约-16384到+16384）
-                      .Kp = 1.75f, // 速度环比例（开环输出需要更大的Kp）
-                      .Ki = 1.51f, // 速度环积分（消除稳态误差）
-                      .Kd = 0.0f,
+                      .kp = 1.75f, // 速度环比例（开环输出需要更大的Kp）
+                      .ki = 1.51f, // 速度环积分（消除稳态误差）
+                      .kd = 0.0f,
                       // 输出滤波：对速度环输出做一阶低通，抑制齿隙/负载突变引起的力矩抖动
                       // 建议从 0.01s 起步（约 16Hz
                       // 截止），再根据响应/抖动情况微调
@@ -141,8 +141,8 @@ void ShootInit() // 已适配三摩擦轮发射机构（倒三角布局）
   };
   loader = DJIMotorInit(&loader_config);
 
-  shoot_pub = PubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
-  shoot_sub = SubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
+  shoot_pub = RegisterPublisher("shoot_feed", sizeof(Shoot_Upload_Data_s));
+  shoot_sub = RegisterSubscriber("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
 }
 
 /* 机器人发射机构控制核心任务 */
@@ -291,24 +291,24 @@ void ShootTask() {
     // 根据收到的弹速设置设定摩擦轮电机参考值,需实测后填入
     switch (shoot_cmd_recv.bullet_speed) {
     case SMALL_AMU_15:
-      DJIMotorSetRef(friction_bottom, 24000); // 15m/s弹速对应转速
-      DJIMotorSetRef(friction_top_left, 24000);
-      DJIMotorSetRef(friction_top_right, 24000);
+      DJIMotorSetRef(friction_bottom, 57000); // 15m/s弹速对应转速
+      DJIMotorSetRef(friction_top_left, 57000);
+      DJIMotorSetRef(friction_top_right, 57000);
       break;
     case SMALL_AMU_18:
-      DJIMotorSetRef(friction_bottom, 24000); // 18m/s弹速对应转速
-      DJIMotorSetRef(friction_top_left, 24000);
-      DJIMotorSetRef(friction_top_right, 24000);
+      DJIMotorSetRef(friction_bottom, 49000); // 18m/s弹速对应转速
+      DJIMotorSetRef(friction_top_left, 49000);
+      DJIMotorSetRef(friction_top_right, 49000);
       break;
     case SMALL_AMU_30:
-      DJIMotorSetRef(friction_bottom, 24000); // 30m/s弹速对应转速
-      DJIMotorSetRef(friction_top_left, 24000);
-      DJIMotorSetRef(friction_top_right, 24000);
+      DJIMotorSetRef(friction_bottom, 49000); // 30m/s弹速对应转速
+      DJIMotorSetRef(friction_top_left, 49000);
+      DJIMotorSetRef(friction_top_right, 49000);
       break;
     default: // 当前为了调试设定的默认值5450,因为还没有加入裁判系统无法读取弹速.
-      DJIMotorSetRef(friction_bottom, 24000);
-      DJIMotorSetRef(friction_top_left, 24000);
-      DJIMotorSetRef(friction_top_right, 24000);
+      DJIMotorSetRef(friction_bottom, 49000);
+      DJIMotorSetRef(friction_top_left, 49000);
+      DJIMotorSetRef(friction_top_right, 49000);
       break;
     }
   } else // 关闭摩擦轮

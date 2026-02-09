@@ -62,8 +62,8 @@ void Gimbal_SysIDTaskInit(DJIMotorInstance *yaw, DMMotorInstance *pitch, attitud
     sysid_imu_data = imu;
     
     // 注册消息中心话题
-    sysid_pub = PubRegister("gimbal_sysid_feedback", sizeof(SysID_Feedback_s));
-    sysid_sub = SubRegister("gimbal_sysid_cmd", sizeof(SysID_Ctrl_Cmd_s));
+    sysid_pub = RegisterPublisher("gimbal_sysid_feedback", sizeof(SysID_Feedback_s));
+    sysid_sub = RegisterSubscriber("gimbal_sysid_cmd", sizeof(SysID_Ctrl_Cmd_s));
     
     // 初始化数据结构
     memset(&sysid_data, 0, sizeof(SysID_Feedback_s));

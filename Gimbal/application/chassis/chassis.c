@@ -106,18 +106,18 @@ void ChassisInit() {
           {
               .speed_PID =
                   {
-                      .Kp = 2.0f, // 4.5
-                      .Ki = 0.1f, // 0
-                      .Kd = 0,    // 0
+                      .kp = 2.0f, // 4.5
+                      .ki = 0.1f, // 0
+                      .kd = 0,    // 0
                       .IntegralLimit = 2000,
                       .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit,
                       .MaxOut = 15000,
                   },
               .current_PID =
                   {
-                      .Kp = 1.5f, // 0.4
-                      .Ki = 0.1f, // 0
-                      .Kd = 0,
+                      .kp = 1.5f, // 0.4
+                      .ki = 0.1f, // 0
+                      .kd = 0,
                       .IntegralLimit = 2000,
                       .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit,
                       .MaxOut = 15000,
@@ -182,15 +182,15 @@ void ChassisInit() {
 #endif                                        // CHASSIS_BOARD
 
 #ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息
-  chassis_sub = SubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-  chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
+  chassis_sub = RegisterSubscriber("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
+  chassis_pub = RegisterPublisher("chassis_feed", sizeof(Chassis_Upload_Data_s));
 #endif // ONE_BOARD
 
   // 底盘跟随云台PID控制器初始化
   PID_Init_Config_s follow_pid_config = {
-      .Kp = 1.5f,                    // 比例系数,根据实际调试
-      .Ki = 0.0f,                    // 积分系数,一般不需要积分
-      .Kd = 0.0f,                    // 微分系数
+      .kp = 1.5f,                    // 比例系数,根据实际调试
+      .ki = 0.0f,                    // 积分系数,一般不需要积分
+      .kd = 0.0f,                    // 微分系数
       .IntegralLimit = 1000.0f,      // 积分限幅
       .MaxOut = 8000.0f,             // 最大输出(底盘旋转速度限制)
       .DeadBand = 0.5f,              // 死区,小于0.5度不控制
@@ -218,7 +218,6 @@ void ChassisInit() {
 // 坡度补偿相关定义
 #define BACK_COG_LENGTH                                                        \
   DIST_CG_REAR_AXLE // 暂未整定前后重心,所以直接使用前后轮距的一半
-#define FRONT_COG_LENGTH DIST_CG_FRONT_AXLE // 可以直接在robot_def.h中修改定义
 /**
  * @brief 计算每个轮毂电机的输出,正运动学解算
  *        用宏进行预替换减小开销,运动解算具体过程参考教程

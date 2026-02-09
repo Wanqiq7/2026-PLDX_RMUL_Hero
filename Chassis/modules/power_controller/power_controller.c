@@ -12,122 +12,216 @@
 
 /* ======================== 内部变量 ======================== */
 
-// RLS参数辨识实例
-static RLSInstance power_rls;
+// 功率限制查表（参考港科大实现，RM2024规则）
+static const uint8_t HeroChassisPowerLimit[MAX_ROBOT_LEVEL] = {
+    55U, 60U, 65U, 70U, 75U, 80U, 85U, 90U, 100U, 120U};
+static const uint8_t InfantryChassisPowerLimit[MAX_ROBOT_LEVEL] = {
+    45U, 50U, 55U, 60U, 65U, 70U, 75U, 80U, 90U, 100U};
+static const uint8_t SentryChassisPowerLimit = 100U;
 
-// 功率模型参数（动态更新）
-static float power_k1 = 0.22f;
-static float power_k2 = 1.2f;
-static float power_k3 = 5.2f;
+/**
+ * @brief 功率控制器实例结构体（内部实现）
+ */
+struct PowerControllerInstance {
+  // 配置参数
+  PowerControllerConfig_t config;
 
-// 控制器配置
-static PowerControllerConfig_t controller_config;
+  // RLS参数辨识
+  RLSInstance rls;
+  float k1, k2, k3;
 
-// 裁判系统数据
-static struct {
-  float power_limit;
-  float power_buffer;
-  float chassis_power;
-} referee_data = {80.0f, 60.0f, 0.0f};
+  // 裁判系统数据
+  struct {
+    float power_limit;
+    float power_buffer;
+    float chassis_power;
+    uint8_t online;
+    uint8_t robot_level;
+  } referee;
 
-// 超级电容数据
-static struct {
-  uint8_t voltage;
-  uint8_t online;
-  float energy; // 估算能量 (J)
-} cap_data = {0, 0, 0.0f};
+  // 超级电容数据
+  struct {
+    uint8_t energy_percent;
+    uint8_t online;
+  } cap;
 
-// 电机反馈数据
-static struct {
-  float speeds[4];  // rad/s
-  float torques[4]; // Nm
-} motor_feedback;
+  // 电机反馈
+  struct {
+    float speeds[4];
+    float torques[4];
+    uint8_t online[4];
+    uint16_t disconnect_cnt[4];
+  } motor;
 
-// PD控制器状态（base和full各自独立）
-static float power_pd_last_error_full = 0.0f;
-static float power_pd_last_error_base = 0.0f;
+  // PD控制器状态
+  float pd_last_error_full;
+  float pd_last_error_base;
 
-// 功率限制状态
-static struct {
-  float max_power;
-  float power_upper;
-  float power_lower;
-} power_limit_state = {100.0f, 80.0f, 15.0f};
+  // 功率限制状态
+  struct {
+    float max_power;
+    float power_upper;
+    float power_lower;
+  } limit;
 
-// 控制器状态（供外部查询）
-static PowerControllerStatus_t controller_status = {
-    .k1 = 0.22f,
-    .k2 = 1.2f,
-    .max_power_limit = 100.0f,
-    .rls_enabled = 1,
+  // 错误标志
+  uint8_t error_flags;
+  uint8_t last_robot_level;
+
+  // 状态（供外部查询）
+  PowerControllerStatus_t status;
 };
+
+// 实例存储（单实例模式）
+static PowerControllerInstance power_ctrl_instance;
+static uint8_t instance_initialized = 0;
 
 /* ======================== 内部函数 ======================== */
 
 /**
- * @brief 能量环控制：计算功率上下限
+ * @brief 更新错误标志
+ * @param inst 功率控制器实例
  */
-static void EnergyLoopControl(void) {
-  float max_power = referee_data.power_limit;
-  float energy_feedback = referee_data.power_buffer;
+static void UpdateErrorFlags(PowerControllerInstance *inst) {
+  inst->error_flags = POWER_ERROR_NONE;
+
+  // 检查电容状态
+  if (!inst->cap.online) {
+    inst->error_flags |= POWER_ERROR_CAP_DISCONNECT;
+  }
+
+  // 检查裁判系统状态
+  if (!inst->referee.online) {
+    inst->error_flags |= POWER_ERROR_REFEREE_DISCONNECT;
+  }
+
+  // 检查电机状态
+  for (int i = 0; i < 4; i++) {
+    if (!inst->motor.online[i]) {
+      inst->error_flags |= POWER_ERROR_MOTOR_DISCONNECT;
+      break;
+    }
+  }
+
+  inst->status.error_flags = inst->error_flags;
+}
+
+/**
+ * @brief 根据机器人类型和等级获取功率限制
+ */
+static float GetPowerLimitByLevel(RobotDivision_e division, uint8_t level) {
+  if (level < 1) level = 1;
+  if (level > MAX_ROBOT_LEVEL) level = MAX_ROBOT_LEVEL;
+
+  switch (division) {
+  case ROBOT_HERO:
+    return (float)HeroChassisPowerLimit[level - 1];
+  case ROBOT_INFANTRY:
+    return (float)InfantryChassisPowerLimit[level - 1];
+  case ROBOT_SENTRY:
+    return (float)SentryChassisPowerLimit;
+  default:
+    return (float)InfantryChassisPowerLimit[level - 1];
+  }
+}
+
+/**
+ * @brief 能量环控制：计算功率上下限
+ * @param inst 功率控制器实例
+ */
+static void EnergyLoopControl(PowerControllerInstance *inst) {
+  // 更新错误标志
+  UpdateErrorFlags(inst);
+
+  float referee_max_power = inst->referee.power_limit;
+  float power_upper_limit = referee_max_power;
+  float energy_feedback = inst->referee.power_buffer;
   float full_buff_set = REFEREE_FULL_BUFF;
   float base_buff_set = REFEREE_BASE_BUFF;
 
-  // 优先使用超级电容数据
-  if (cap_data.online) {
-    // 电容能量百分比：直接使用0-255范围值，与PD控制器阈值单位一致
-    energy_feedback = (float)cap_data.voltage;
+  // 裁判系统断连时，按等级查表获取功率限制
+  if (inst->error_flags & POWER_ERROR_REFEREE_DISCONNECT) {
+    referee_max_power =
+        GetPowerLimitByLevel(inst->config.robot_division, inst->last_robot_level);
+  } else {
+    // 更新最后记录的等级
+    if (inst->referee.robot_level >= 1 &&
+        inst->referee.robot_level <= MAX_ROBOT_LEVEL) {
+      inst->last_robot_level = inst->referee.robot_level;
+    }
+  }
+
+  // 根据电容状态设置能量反馈和阈值
+  if (inst->cap.online) {
+    energy_feedback = (float)inst->cap.energy_percent;
     full_buff_set = CAP_FULL_BUFF;
     base_buff_set = CAP_BASE_BUFF;
-    // 有电容时可以增加功率上限
-    max_power = referee_data.power_limit + MAX_CAP_POWER_OUT;
+    power_upper_limit = referee_max_power + MAX_CAP_POWER_OUT;
+  } else {
+    power_upper_limit = referee_max_power;
   }
 
   // PD控制器调节功率限制
-  // 使用sqrt变换使能量较低时更敏感
   float error_full = sqrtf(full_buff_set) - sqrtf(energy_feedback);
   float error_base = sqrtf(base_buff_set) - sqrtf(energy_feedback);
 
   // base和full各自独立的PD控制器
   float pd_output_full = POWER_PD_KP * error_full +
-                         POWER_PD_KD * (error_full - power_pd_last_error_full);
+                         POWER_PD_KD * (error_full - inst->pd_last_error_full);
   float pd_output_base = POWER_PD_KP * error_base +
-                         POWER_PD_KD * (error_base - power_pd_last_error_base);
+                         POWER_PD_KD * (error_base - inst->pd_last_error_base);
 
-  power_pd_last_error_full = error_full;
-  power_pd_last_error_base = error_base;
+  inst->pd_last_error_full = error_full;
+  inst->pd_last_error_base = error_base;
 
   // 计算功率上下限
-  power_limit_state.power_upper =
-      fmaxf(referee_data.power_limit - pd_output_full, 15.0f);
-  power_limit_state.power_lower =
-      fmaxf(referee_data.power_limit - pd_output_base, 15.0f);
+  float max_power = power_upper_limit;
+  inst->limit.power_upper =
+      fmaxf(referee_max_power - pd_output_full, MIN_POWER_CONFIGURED);
+  inst->limit.power_lower =
+      fmaxf(referee_max_power - pd_output_base, MIN_POWER_CONFIGURED);
 
-  // 限制在上下限之间
-  if (max_power > power_limit_state.power_upper)
-    max_power = power_limit_state.power_upper;
-  if (max_power < power_limit_state.power_lower)
-    max_power = power_limit_state.power_lower;
+  // 双断连保守策略
+  uint8_t cap_gg = (inst->error_flags & POWER_ERROR_CAP_DISCONNECT);
+  uint8_t ref_gg = (inst->error_flags & POWER_ERROR_REFEREE_DISCONNECT);
 
-  power_limit_state.max_power = max_power;
+  if (cap_gg && ref_gg) {
+    max_power = referee_max_power * CAP_REFEREE_BOTH_GG_COE;
+    inst->limit.power_upper = max_power;
+    inst->limit.power_lower = max_power;
+    inst->pd_last_error_full = 0.0f;
+    inst->pd_last_error_base = 0.0f;
+  } else {
+    if (max_power > inst->limit.power_upper)
+      max_power = inst->limit.power_upper;
+    if (max_power < inst->limit.power_lower)
+      max_power = inst->limit.power_lower;
+  }
+
+  inst->limit.max_power = max_power;
 
   // 更新状态
-  controller_status.max_power_limit = max_power;
-  controller_status.power_upper = power_limit_state.power_upper;
-  controller_status.power_lower = power_limit_state.power_lower;
-  controller_status.energy_feedback = energy_feedback;
-  controller_status.cap_online = cap_data.online;
+  inst->status.max_power_limit = max_power;
+  inst->status.power_upper = inst->limit.power_upper;
+  inst->status.power_lower = inst->limit.power_lower;
+  inst->status.referee_max_power = referee_max_power;
+  inst->status.power_upper_limit = power_upper_limit;
+  inst->status.energy_feedback = energy_feedback;
+  inst->status.cap_online = inst->cap.online;
+  inst->status.referee_online = inst->referee.online;
+  inst->status.robot_level = inst->last_robot_level;
 }
 
 /**
- * @brief RLS参数更新（内部函数，避免与controller.h中的RLSUpdate冲突）
+ * @brief RLS参数更新
+ * @param inst 功率控制器实例
  */
-static void PowerRLSUpdate(void) {
-  if (!controller_status.rls_enabled) {
+static void PowerRLSUpdate(PowerControllerInstance *inst) {
+  if (!inst->status.rls_enabled) {
     return;
   }
 
-  float measured_power = referee_data.chassis_power;
+  float measured_power = inst->referee.chassis_power;
 
   // 只在功率大于阈值时更新，避免噪声
   if (fabsf(measured_power) < 5.0f) {
@@ -139,55 +233,56 @@ static void PowerRLSUpdate(void) {
 
   // 计算采样向量 [Σ|ω|, Στ²]
   for (int i = 0; i < 4; i++) {
-    sample_vector[0] += fabsf(motor_feedback.speeds[i]);
-    sample_vector[1] += motor_feedback.torques[i] * motor_feedback.torques[i];
-    effective_power += motor_feedback.torques[i] * motor_feedback.speeds[i];
+    sample_vector[0] += fabsf(inst->motor.speeds[i]);
+    sample_vector[1] += inst->motor.torques[i] * inst->motor.torques[i];
+    effective_power += inst->motor.torques[i] * inst->motor.speeds[i];
   }
 
   // 功率损耗 = 实测功率 - 有效功率 - 静态损耗
-  float power_loss = measured_power - effective_power - power_k3;
+  float power_loss = measured_power - effective_power - inst->k3;
 
   // RLS更新
-  RLSUpdate(&power_rls, sample_vector, power_loss);
+  RLSUpdate(&inst->rls, sample_vector, power_loss);
 
-  // 获取更新后的参数并限幅，防止发散
-  RLSGetParams(&power_rls, &power_k1, &power_k2);
+  // 获取更新后的参数并限幅
+  RLSGetParams(&inst->rls, &inst->k1, &inst->k2);
 
-  // 参数限幅（只做下限保护，防止发散到负数）
-  power_k1 = fmaxf(power_k1, 1e-5f);
-  power_k2 = fmaxf(power_k2, 1e-5f);
+  // 参数限幅（防止发散到负数）
+  inst->k1 = fmaxf(inst->k1, 1e-5f);
+  inst->k2 = fmaxf(inst->k2, 1e-5f);
 
   // 更新状态
-  controller_status.k1 = power_k1;
-  controller_status.k2 = power_k2;
+  inst->status.k1 = inst->k1;
+  inst->status.k2 = inst->k2;
 }
 
 /**
  * @brief 预测功率消耗
+ * @param inst 功率控制器实例
  */
-static float PredictPower(float torque, float speed) {
-  return torque * speed + power_k1 * fabsf(speed) + power_k2 * torque * torque +
-         power_k3 / 4.0f;
+static float PredictPower(PowerControllerInstance *inst, float torque,
+                          float speed) {
+  return torque * speed + inst->k1 * fabsf(speed) +
+         inst->k2 * torque * torque + inst->k3 / 4.0f;
 }
 
 /**
  * @brief 计算二次方程最大转矩
+ * @param inst 功率控制器实例
  */
-static float SolveMaxTorque(float speed, float power_allocated,
-                            float current_torque) {
+static float SolveMaxTorque(PowerControllerInstance *inst, float speed,
+                            float power_allocated, float current_torque) {
   // 求解二次方程: k2*τ² + ω*τ + (k1|ω| + k3/4 - P) = 0
-  float A = power_k2;
+  float A = inst->k2;
   float B = speed;
-  float C = power_k1 * fabsf(speed) + power_k3 / 4.0f - power_allocated;
+  float C = inst->k1 * fabsf(speed) + inst->k3 / 4.0f - power_allocated;
 
   float delta = B * B - 4.0f * A * C;
   float max_torque = 0.0f;
 
   if (delta <= 0.0f) {
-    // 无实数解或重根，取顶点
     max_torque = -B / (2.0f * A);
   } else {
-    // 两个实数解，选择与当前转矩符号一致的解
     float sqrt_delta = sqrtf(delta);
     float torque_pos = (-B + sqrt_delta) / (2.0f * A);
     float torque_neg = (-B - sqrt_delta) / (2.0f * A);
@@ -204,41 +299,70 @@ static float SolveMaxTorque(float speed, float power_allocated,
 
 /* ======================== 接口函数实现 ======================== */
 
-void PowerControllerInit(const PowerControllerConfig_t *config) {
+PowerControllerInstance *PowerControllerRegister(
+    const PowerControllerConfig_t *config) {
+  // 检查是否已初始化（单实例模式）
+  if (instance_initialized) {
+    return &power_ctrl_instance;
+  }
+
+  PowerControllerInstance *inst = &power_ctrl_instance;
+
   // 保存配置
-  controller_config = *config;
+  inst->config = *config;
 
   // 初始化功率模型参数
-  power_k1 = config->k1_init;
-  power_k2 = config->k2_init;
-  power_k3 = config->k3;
+  inst->k1 = config->k1_init;
+  inst->k2 = config->k2_init;
+  inst->k3 = config->k3;
 
   // RLS初始化
   RLS_Init_Config_s rls_config = {
       .lambda = config->rls_lambda,
-      .delta =
-          1e-5f, // 协方差矩阵初始值，推荐1e-5~1e-3，过大会导致首次更新参数剧变
+      .delta = 1e-5f,
       .init_k1 = config->k1_init,
       .init_k2 = config->k2_init,
   };
-  RLSInit(&power_rls, &rls_config);
+  RLSInit(&inst->rls, &rls_config);
+
+  // 初始化默认值
+  inst->referee.power_limit = 80.0f;
+  inst->referee.power_buffer = 60.0f;
+  inst->referee.robot_level = 1;
+  inst->last_robot_level = 1;
+  inst->limit.max_power = 100.0f;
+  inst->limit.power_upper = 80.0f;
+  inst->limit.power_lower = 15.0f;
+
+  for (int i = 0; i < 4; i++) {
+    inst->motor.online[i] = 1;
+  }
 
   // 初始化状态
-  controller_status.k1 = power_k1;
-  controller_status.k2 = power_k2;
-  controller_status.rls_enabled = RLS_ENABLE;
+  inst->status.k1 = inst->k1;
+  inst->status.k2 = inst->k2;
+  inst->status.max_power_limit = 100.0f;
+  inst->status.rls_enabled = RLS_ENABLE;
+
+  instance_initialized = 1;
+  return inst;
 }
 
-void PowerControllerTask(void) {
+void PowerControllerTask(PowerControllerInstance *instance) {
+  if (instance == NULL) return;
+
   // 1. 能量环控制
-  EnergyLoopControl();
+  EnergyLoopControl(instance);
 
   // 2. RLS参数更新
-  PowerRLSUpdate();
+  PowerRLSUpdate(instance);
 }
 
-void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]) {
-  float max_power = power_limit_state.max_power;
+void PowerGetLimitedOutput(PowerControllerInstance *instance,
+                           PowerMotorObj_t motor_objs[4], float output[4]) {
+  if (instance == NULL) return;
+
+  float max_power = instance->limit.max_power;
 
   // 1. 预测功率消耗
   float cmd_power[4];
@@ -246,27 +370,30 @@ void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]) {
   float sum_positive_power = 0.0f;
 
   for (int i = 0; i < 4; i++) {
-    // 转换PID输出为转矩
-    float torque = motor_objs[i].pid_output * controller_config.current_scale *
-                   controller_config.torque_constant;
+    if (instance->motor.disconnect_cnt[i] >= MOTOR_DISCONNECT_TIMEOUT) {
+      cmd_power[i] = 0.0f;
+      output[i] = 0.0f;
+      continue;
+    }
+
+    float torque = motor_objs[i].pid_output * instance->config.current_scale *
+                   instance->config.torque_constant;
     float speed = motor_objs[i].current_av;
 
-    cmd_power[i] = PredictPower(torque, speed);
+    cmd_power[i] = PredictPower(instance, torque, speed);
     sum_cmd_power += cmd_power[i];
 
-    // 统计正功率
     if (cmd_power[i] > 0.0f) {
       sum_positive_power += cmd_power[i];
     } else {
-      // 负功率回收
       max_power += (-cmd_power[i]);
     }
   }
 
-  controller_status.sum_cmd_power = sum_cmd_power;
-  controller_status.estimated_power = sum_cmd_power;
+  instance->status.sum_cmd_power = sum_cmd_power;
+  instance->status.estimated_power = sum_cmd_power;
 
-  // 2. 如果功率不超限，直接输出
+  // 2. 功率不超限，直接输出
   if (sum_positive_power <= max_power) {
     for (int i = 0; i < 4; i++) {
       output[i] = motor_objs[i].pid_output;
@@ -274,7 +401,7 @@ void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]) {
     return;
   }
 
-  // 3. 功率超限，进行智能分配
+  // 3. 功率超限，智能分配
   float speed_error[4];
   float sum_error = 0.0f;
 
@@ -283,7 +410,6 @@ void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]) {
     sum_error += speed_error[i];
   }
 
-  // 计算error分配的置信度
   float error_confidence = 0.0f;
   if (sum_error > ERROR_POWER_DISTRIBUTION_THRESHOLD) {
     error_confidence = 1.0f;
@@ -293,14 +419,12 @@ void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]) {
                         PROP_POWER_DISTRIBUTION_THRESHOLD);
   }
 
-  // 为每个电机分配功率并计算限制
   for (int i = 0; i < 4; i++) {
     if (cmd_power[i] <= 0.0f) {
       output[i] = motor_objs[i].pid_output;
       continue;
     }
 
-    // 混合分配策略
     float weight_error =
         (sum_error > 1e-6f) ? (speed_error[i] / sum_error) : 0.25f;
     float weight_prop = (sum_positive_power > 1e-6f)
@@ -311,16 +435,13 @@ void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]) {
 
     float power_allocated = weight * max_power;
 
-    // 转换当前PID输出为转矩
     float current_torque = motor_objs[i].pid_output *
-                           controller_config.current_scale *
-                           controller_config.torque_constant;
+                           instance->config.current_scale *
+                           instance->config.torque_constant;
 
-    // 计算允许的最大转矩
-    float max_torque = SolveMaxTorque(motor_objs[i].current_av, power_allocated,
-                                      current_torque);
+    float max_torque = SolveMaxTorque(instance, motor_objs[i].current_av,
+                                      power_allocated, current_torque);
 
-    // 转换回PID输出
     if (fabsf(current_torque) > 1e-6f) {
       float torque_scale = max_torque / current_torque;
       torque_scale = float_constrain(torque_scale, 0.0f, 1.0f);
@@ -331,33 +452,69 @@ void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]) {
   }
 }
 
-void PowerUpdateRefereeData(float chassis_power_limit,
+void PowerUpdateRefereeData(PowerControllerInstance *instance,
+                            float chassis_power_limit,
                             float chassis_power_buffer, float chassis_power) {
-  referee_data.power_limit = chassis_power_limit;
-  referee_data.power_buffer = chassis_power_buffer;
-  referee_data.chassis_power = chassis_power;
+  if (instance == NULL) return;
+  instance->referee.power_limit = chassis_power_limit;
+  instance->referee.power_buffer = chassis_power_buffer;
+  instance->referee.chassis_power = chassis_power;
 }
 
-void PowerUpdateCapData(uint8_t cap_voltage, uint8_t cap_online) {
-  cap_data.voltage = cap_voltage;
-  cap_data.online = cap_online;
+void PowerUpdateCapData(PowerControllerInstance *instance, uint8_t cap_energy,
+                        uint8_t cap_online) {
+  if (instance == NULL) return;
+  instance->cap.energy_percent = cap_energy;
+  instance->cap.online = cap_online;
 }
 
-void PowerUpdateMotorFeedback(float motor_speeds[4], float motor_torques[4]) {
+void PowerUpdateMotorFeedback(PowerControllerInstance *instance,
+                              float motor_speeds[4], float motor_torques[4]) {
+  if (instance == NULL) return;
   for (int i = 0; i < 4; i++) {
-    motor_feedback.speeds[i] = motor_speeds[i];
-    motor_feedback.torques[i] = motor_torques[i];
+    instance->motor.speeds[i] = motor_speeds[i];
+    instance->motor.torques[i] = motor_torques[i];
   }
 }
 
-const PowerControllerStatus_t *PowerGetStatus(void) {
-  return &controller_status;
+const PowerControllerStatus_t *PowerGetStatus(PowerControllerInstance *instance) {
+  if (instance == NULL) return NULL;
+  return &instance->status;
 }
 
-void PowerSetRLSEnable(uint8_t enable) {
-  controller_status.rls_enabled = enable;
+void PowerSetRLSEnable(PowerControllerInstance *instance, uint8_t enable) {
+  if (instance == NULL) return;
+  instance->status.rls_enabled = enable;
 }
 
-void PowerSetUserLimit(float power_limit) {
-  referee_data.power_limit = power_limit;
+void PowerSetUserLimit(PowerControllerInstance *instance, float power_limit) {
+  if (instance == NULL) return;
+  instance->referee.power_limit = power_limit;
+}
+
+void PowerUpdateRefereeOnline(PowerControllerInstance *instance, uint8_t online,
+                              uint8_t robot_level) {
+  if (instance == NULL) return;
+  instance->referee.online = online;
+  if (robot_level >= 1 && robot_level <= MAX_ROBOT_LEVEL) {
+    instance->referee.robot_level = robot_level;
+  }
+}
+
+void PowerUpdateMotorOnline(PowerControllerInstance *instance,
+                            uint8_t motor_index, uint8_t online) {
+  if (instance == NULL || motor_index >= 4) return;
+  instance->motor.online[motor_index] = online;
+  if (online) {
+    instance->motor.disconnect_cnt[motor_index] = 0;
+  } else {
+    if (instance->motor.disconnect_cnt[motor_index] < MOTOR_DISCONNECT_TIMEOUT) {
+      instance->motor.disconnect_cnt[motor_index]++;
+    }
+  }
+}
+
+uint8_t PowerGetErrorFlags(PowerControllerInstance *instance) {
+  if (instance == NULL) return 0xFF;
+  return instance->error_flags;
 }

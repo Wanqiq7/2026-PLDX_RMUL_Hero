@@ -91,3 +91,9 @@ venv/
 **/.git
 **/.git.bak*/
 **/.git_backup*/
+
+# ===== 用户指定忽略 =====
+RM2024-PowerModule-main/
+robowalker2024bottominfantry-main/
+CLAUDE.md
+**/CLAUDE.md

@@ -10,11 +10,11 @@
 #include "buzzer.h"
 #include "daemon.h"
 #include "ins_task.h"
-#include "master_process.h"
 #include "motor_task.h"
 #include "referee_task.h"
 #include "robot.h"
 #include "sysid_task.h"
+#include "vision_comm.h"
 
 #include "bsp_log.h"
 

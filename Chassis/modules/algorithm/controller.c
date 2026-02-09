@@ -17,7 +17,7 @@
 // 梯形积分
 static void f_Trapezoid_Intergral(PIDInstance *pid) {
   // 计算梯形的面积,(上底+下底)*高/2
-  pid->ITerm = pid->Ki * ((pid->Err + pid->Last_Err) / 2) * pid->dt;
+  pid->ITerm = pid->ki * ((pid->Err + pid->Last_Err) / 2) * pid->dt;
 }
 
 // 变速积分(误差小时积分作用更强)
@@ -57,7 +57,7 @@ static void f_Integral_Limit(PIDInstance *pid) {
 
 // 微分先行(仅使用反馈值而不计参考输入的微分)
 static void f_Derivative_On_Measurement(PIDInstance *pid) {
-  pid->Dout = pid->Kd * (pid->Last_Measure - pid->Measure) / pid->dt;
+  pid->Dout = pid->kd * (pid->Last_Measure - pid->Measure) / pid->dt;
 }
 
 // 微分滤波(采集微分时,滤除高频噪声)
@@ -147,9 +147,9 @@ float PIDCalculate(PIDInstance *pid, float measure, float ref) {
   // 如果在死区外,则计算PID
   if (abs(pid->Err) > pid->DeadBand) {
     // 基本的pid计算,使用位置式
-    pid->Pout = pid->Kp * pid->Err;
-    pid->ITerm = pid->Ki * pid->Err * pid->dt;
-    pid->Dout = pid->Kd * (pid->Err - pid->Last_Err) / pid->dt;
+    pid->Pout = pid->kp * pid->Err;
+    pid->ITerm = pid->ki * pid->Err * pid->dt;
+    pid->Dout = pid->kd * (pid->Err - pid->Last_Err) / pid->dt;
 
     // 梯形积分
     if (pid->Improve & PID_Trapezoid_Intergral)
@@ -269,17 +269,14 @@ void RLSUpdate(RLSInstance *rls, float sample_vector[2], float actual_output) {
   rls->params_vector[0] += K[0] * error;
   rls->params_vector[1] += K[1] * error;
 
-  // 限制参数在合理范围内（基于M3508电机物理特性）
-  // k1: 转速损耗系数，典型值0.1-0.5（摩擦损耗）
-  // k2: 力矩平方损耗系数，典型值0.01-0.1（电阻损耗I²R）
-  if (rls->params_vector[0] < 0.01f)
-    rls->params_vector[0] = 0.01f;
-  if (rls->params_vector[1] < 0.1f)
-    rls->params_vector[1] = 0.1f;
-  if (rls->params_vector[0] > 0.35f)
-    rls->params_vector[0] = 0.35f;
-  if (rls->params_vector[1] > 2.0f) // 放宽上限，允许RLS探索更大范围
-    rls->params_vector[1] = 2.0f;
+  // 限制参数在合理范围内（参考港科大实现）
+  // 仅做下限保护，防止参数发散到负数
+  // k1: 转速损耗系数，典型值0.1-0.5
+  // k2: 力矩平方损耗系数，典型值0.5-2.0
+  if (rls->params_vector[0] < 1e-5f)
+    rls->params_vector[0] = 1e-5f;
+  if (rls->params_vector[1] < 1e-5f)
+    rls->params_vector[1] = 1e-5f;
 
   // 计算 K(k) * φ^T(k)
   K_phi_T[0] = K[0] * phi[0]; // K[0] * phi[0]

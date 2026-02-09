@@ -6,10 +6,11 @@
 #include "dji_motor.h"
 #include "general_def.h"
 #include "ins_task.h"
-#include "master_process.h"
 #include "message_center.h"
 #include "remote_control.h"
 #include "user_lib.h"
+#include "vision_comm.h"
+
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -100,17 +101,17 @@ void RobotCMDInit() {
   // 注意: 视觉CAN通信初始化已移至 VisionAppInit() (vision.c)
 
   // 视觉控制消息注册
-  vision_cmd_pub = PubRegister("vision_cmd", sizeof(Vision_Ctrl_Cmd_s));
-  vision_data_sub = SubRegister("vision_data", sizeof(Vision_Upload_Data_s));
+  vision_cmd_pub = RegisterPublisher("vision_cmd", sizeof(Vision_Ctrl_Cmd_s));
+  vision_data_sub = RegisterSubscriber("vision_data", sizeof(Vision_Upload_Data_s));
 
-  gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
-  gimbal_feed_sub = SubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
-  shoot_cmd_pub = PubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
-  shoot_feed_sub = SubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
+  gimbal_cmd_pub = RegisterPublisher("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
+  gimbal_feed_sub = RegisterSubscriber("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
+  shoot_cmd_pub = RegisterPublisher("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
+  shoot_feed_sub = RegisterSubscriber("shoot_feed", sizeof(Shoot_Upload_Data_s));
 
 #ifdef ONE_BOARD // 双板兼容
-  chassis_cmd_pub = PubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-  chassis_feed_sub = SubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
+  chassis_cmd_pub = RegisterPublisher("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
+  chassis_feed_sub = RegisterSubscriber("chassis_feed", sizeof(Chassis_Upload_Data_s));
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
   CANComm_Init_Config_s comm_conf = {
@@ -127,10 +128,6 @@ void RobotCMDInit() {
 #endif                          // GIMBAL_BOARD
   gimbal_cmd_send.yaw = 0.0f;   // Yaw初始化为0弧度
   gimbal_cmd_send.pitch = 0.0f; // Pitch初始化为0弧度
-  gimbal_cmd_send.yaw_vel_ff = 0.0f;
-  gimbal_cmd_send.yaw_acc_ff = 0.0f;
-  gimbal_cmd_send.pitch_vel_ff = 0.0f;
-  gimbal_cmd_send.pitch_acc_ff = 0.0f;
 
   // 初始化发射模块控制指令
   shoot_cmd_send.shoot_mode = SHOOT_ON;        // 发射模块使能
@@ -234,7 +231,7 @@ static void RemoteControlSet() {
   if (switch_is_mid(rc_data[TEMP].rc.switch_left)) {
     chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
     gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
-    // gimbal_cmd_send.gimbal_mode = GIMBAL_SYS_ID_CHIRP;
+    // gimbal_cmd_send.gimbal_mode = GIMBAL_SYS_ID_CHIRP; #系统辨识开关
   }
   // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
   else if (switch_is_down(
@@ -304,16 +301,23 @@ static void RemoteControlSet() {
   } else if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
     // 上档：自瞄模式（英雄机器人标准配置）
     shoot_cmd_send.friction_mode = FRICTION_ON;
-    // shoot_cmd_send.load_mode = LOAD_STOP; // ⭐ 停止拨盘，等待视觉驱动
+    // 自瞄下默认不主动拨弹：由视觉 should_fire 决定是否触发发射
+    shoot_cmd_send.load_mode = LOAD_STOP;
     shoot_cmd_send.shoot_rate = 1.0f; // 1Hz射频（每秒1发，不应期1000ms）
-    // vision_cmd_send.vision_mode = VISION_MODE_AUTO_AIM; // ⭐ 启用自瞄
-    // vision_cmd_send.allow_auto_fire = 1;                // ⭐
-    // 授权视觉控制射击
-    // 单发：角度环（每次拨盘转过“一发角度”）
-    shoot_cmd_send.load_mode = LOAD_1_BULLET;
+    // 启用自瞄：视觉无目标时允许遥控器操控云台（由 gimbal 层接管/仲裁）
+    vision_cmd_send.vision_mode = VISION_MODE_AUTO_AIM;
+    vision_cmd_send.allow_auto_fire = 1;
+
+    // 自瞄时切到独立自瞄模式（Yaw 视觉双环 / Pitch MIT位置刚度）
+    // 视觉无目标时云台仍由遥控器/鼠标控制（接管仲裁在 gimbal 层实现）
+    gimbal_cmd_send.gimbal_mode = GIMBAL_AUTOAIM_MODE;
   }
 }
 
+/**
+ * @brief 视觉数据融合，当视觉有效时覆盖云台和发射控制
+ *
+ */
 /**
  * @brief 输入为键鼠时模式和控制量设置
  *
@@ -444,30 +448,29 @@ static void MouseKeySet() {
   }
 }
 
-/**
- * @brief 视觉数据融合，当视觉有效时覆盖云台和发射控制
- *
- */
 static void VisionControlSet() {
-  // 仅当视觉模式启用且视觉数据有效时才接管控制
-  if (vision_cmd_send.vision_mode != VISION_MODE_OFF &&
-      vision_data_recv.vision_valid) {
-    // 使用视觉数据覆盖云台目标角度（完全接管云台控制）
-    gimbal_cmd_send.yaw = vision_data_recv.yaw;
-    gimbal_cmd_send.pitch = vision_data_recv.pitch;
-    gimbal_cmd_send.yaw_vel_ff =
-        vision_data_recv.yaw_vel_ff; // 仅透传，不在控制环使用
-    gimbal_cmd_send.yaw_acc_ff = vision_data_recv.yaw_acc_ff;
-    gimbal_cmd_send.pitch_vel_ff = vision_data_recv.pitch_vel_ff;
-    gimbal_cmd_send.pitch_acc_ff = vision_data_recv.pitch_acc_ff;
-    LIMIT_PITCH_RAD(gimbal_cmd_send.pitch);
+  // 默认清除视觉直接控制标志
+  gimbal_cmd_send.vision_yaw_direct = 0;
+  gimbal_cmd_send.vision_pitch_direct = 0;
 
-    // ⭐ 视觉驱动发射：根据 should_fire 决定是否触发拨弹
-    if (vision_data_recv.should_fire) {
-      shoot_cmd_send.load_mode = LOAD_BURSTFIRE; // 视觉确认可以射击，触发连射
-      // friction_mode 已在 RemoteControlSet() 上档中设置为 ON，无需重复
+  // 仅当视觉模式启用且视觉接管有效时才传递控制量
+  if (vision_cmd_send.vision_mode != VISION_MODE_OFF &&
+      vision_data_recv.vision_takeover) {
+    // 传递视觉控制器计算好的控制量给云台
+    gimbal_cmd_send.vision_yaw_direct = 1;
+    gimbal_cmd_send.vision_yaw_current = vision_data_recv.yaw_current_cmd;
+    gimbal_cmd_send.vision_pitch_direct = 1;
+    gimbal_cmd_send.vision_pitch_ref = vision_data_recv.pitch_ref_limited;
+
+    // 注意：不在 cmd 层覆盖云台角度目标，避免在“视觉丢目标/无目标”时
+    //      云台目标角从视觉单圈角跳回导致突跳。
+    //      云台自瞄接管在 gimbal 层实现（Yaw 视觉双环，Pitch 参考限速）。
+
+    // 视觉驱动发射
+    if (vision_cmd_send.allow_auto_fire && vision_data_recv.should_fire) {
+      shoot_cmd_send.load_mode = LOAD_1_BULLET; // 视觉确认可以射击
     } else {
-      shoot_cmd_send.load_mode = LOAD_STOP; // 视觉未确认，停止拨盘
+      shoot_cmd_send.load_mode = LOAD_STOP; // 未确认或未授权，停止拨盘
     }
   }
 }

@@ -130,6 +130,7 @@ static Referee_Interactive_info_t
 static SuperCapInstance *cap; // 超级电容
 
 #if POWER_CONTROLLER_ENABLE
+static PowerControllerInstance *power_ctrl = NULL; // 功率控制器实例
 static USARTInstance *vofa_usart = NULL;
 static uint8_t vofa_tx_buf[32];
 static VofaJustFloatSender_s vofa_sender;
@@ -283,30 +284,34 @@ void ChassisInit() {
   chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
 #endif                                        // CHASSIS_BOARD
 
+#if POWER_CONTROLLER_ENABLE
   // 功率控制器初始化（独立模块）
   // ⚠️ 所有量纲统一到输出轴侧（与功率模型k1、k2参数匹配）
   PowerControllerConfig_t power_config = {
       .k1_init = 0.22f,      // 转速损耗系数初始值（输出轴量纲）
       .k2_init = 1.2f,       // 力矩损耗系数初始值（输出轴量纲）
-      .k3 = 5.2f,            // 静态功率损耗
+      .k3 = 2.78f,           // 静态功率损耗（参考港科大）
       .rls_lambda = 0.9999f, // RLS遗忘因子
       // 输出轴转矩常数 = 0.3 Nm/A
       .torque_constant = M3508_TORQUE_CONSTANT,
       .current_scale = 20.0f / 16384.0f, // CAN指令值转电流系数
+      .robot_division = ROBOT_HERO,      // 机器人类型（用于断连时查表）
   };
-  PowerControllerInit(&power_config);
+  power_ctrl = PowerControllerRegister(&power_config);
+#endif // POWER_CONTROLLER_ENABLE
 
 #ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息
-  chassis_sub = SubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-  chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
+  chassis_sub = RegisterSubscriber("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
+  chassis_pub =
+      RegisterPublisher("chassis_feed", sizeof(Chassis_Upload_Data_s));
 #endif // ONE_BOARD
 
   // 底盘跟随云台PID控制器初始化（统一力控：输出角速度）
   // 注意：输出单位为角速度（rad/s），后续通过力控PID转换为扭矩
   PID_Init_Config_s follow_pid_config = {
-      .Kp = 0.45f, // 单位：(rad/s)/度（角度误差→角速度）
-      .Ki = 0.0f,  // 积分增益（可选开启）
-      .Kd = 0.04f, // 微分增益
+      .kp = 0.45f, // 单位：(rad/s)/度（角度误差→角速度）
+      .ki = 0.0f,  // 积分增益（可选开启）
+      .kd = 0.04f, // 微分增益
       // 微分低通滤波时间常数RC（秒）
       // RobotTask周期约2ms(500Hz)，取微分截止频率fc≈20Hz：
       // RC = 1/(2πfc) ≈ 1/(2π·20) ≈ 0.00796s
@@ -321,9 +326,9 @@ void ChassisInit() {
   /* ----------------力控策略PID初始化---------------- */
   // X方向力控PID初始化 (输出单位: N)
   PID_Init_Config_s force_x_pid_config = {
-      .Kp = 200.0f,                // 比例增益 [N/(m/s)]
-      .Ki = 0.0f,                  // 积分增益 [N/(m·s)]
-      .Kd = 0.0f,                  // 微分增益 [N·s/m]（抑制超调）
+      .kp = 200.0f,                // 比例增益 [N/(m/s)]
+      .ki = 0.0f,                  // 积分增益 [N/(m·s)]
+      .kd = 0.0f,                  // 微分增益 [N·s/m]（抑制超调）
       .Derivative_LPF_RC = 0.12f,  // 微分低通滤波
       .IntegralLimit = 100.0f,     // 积分限幅 [N]
       .MaxOut = MAX_CONTROL_FORCE, // 最大输出力 [N]
@@ -334,9 +339,9 @@ void ChassisInit() {
 
   // Y方向力控PID初始化 (输出单位: N)
   PID_Init_Config_s force_y_pid_config = {
-      .Kp = 200.0f,
-      .Ki = 0.0f,
-      .Kd = 0.0f,
+      .kp = 200.0f,
+      .ki = 0.0f,
+      .kd = 0.0f,
       .Derivative_LPF_RC = 0.02f,
       .IntegralLimit = 100.0f,
       .MaxOut = MAX_CONTROL_FORCE,
@@ -347,9 +352,9 @@ void ChassisInit() {
 
   // 旋转扭矩PID初始化 (输出单位: N·m) - 优化参数减少振荡
   PID_Init_Config_s torque_pid_config = {
-      .Kp = 8.0f, // 比例增益 [N·m/(rad/s)] - 从2.5降至1.5减少过冲
-      .Ki = 0.0f, // 积分增益 [N·m/rad]
-      .Kd = 0.1f, // 微分增益 [N·m·s/rad] - 增加阻尼抑制振荡
+      .kp = 8.0f, // 比例增益 [N·m/(rad/s)] - 从2.5降至1.5减少过冲
+      .ki = 0.0f, // 积分增益 [N·m/rad]
+      .kd = 0.1f, // 微分增益 [N·m·s/rad] - 增加阻尼抑制振荡
       .MaxOut = 6.0f,
       .DeadBand = 0.04f, // 死区 [rad/s] - 修复：从0.15增至0.3，减少回位后震荡
       .Output_LPF_RC = 0.00087f,
@@ -769,20 +774,34 @@ void ChassisTask() {
 
   // 4.2 更新功率控制器数据（暂时无裁判系统，使用超级电容数据）
   // 手动设定功率限制（根据实际测试调整，单位：W）
-  float manual_power_limit = 95.0f;
+  float manual_power_limit = 80.0f;
 
   // 使用超级电容测量的数据
   float cap_energy_buffer = (float)cap_rx_data.cap_energy; // 电容能量 (0-255)
   float measured_power = cap_rx_data.chassis_power;        // 底盘功率 (W)
 
-  PowerUpdateRefereeData(manual_power_limit, cap_energy_buffer, measured_power);
+  PowerUpdateRefereeData(power_ctrl, manual_power_limit, cap_energy_buffer,
+                         measured_power);
 
   // 4.3 更新超级电容在线状态
   // 在线判断：CAN有数据 且 错误码bit7=0（输出未关闭）
   uint8_t cap_online =
       (cap->can_ins->rx_len > 0 && (cap_rx_data.error_code & 0x80) == 0) ? 1
                                                                          : 0;
-  PowerUpdateCapData(cap_rx_data.cap_energy, cap_online);
+  PowerUpdateCapData(power_ctrl, cap_rx_data.cap_energy, cap_online);
+
+  // 4.3.1 更新裁判系统在线状态
+  // TODO: 接入裁判系统后，从referee_data获取在线状态和机器人等级
+  // 暂时设为离线，使用手动功率限制
+  uint8_t referee_online = 0;
+  uint8_t robot_level = 1; // 默认等级1
+  PowerUpdateRefereeOnline(power_ctrl, referee_online, robot_level);
+
+  // 4.3.2 更新电机在线状态
+  PowerUpdateMotorOnline(power_ctrl, 0, DaemonIsOnline(motor_rf->daemon)); // RF
+  PowerUpdateMotorOnline(power_ctrl, 1, DaemonIsOnline(motor_lf->daemon)); // LF
+  PowerUpdateMotorOnline(power_ctrl, 2, DaemonIsOnline(motor_lb->daemon)); // LB
+  PowerUpdateMotorOnline(power_ctrl, 3, DaemonIsOnline(motor_rb->daemon)); // RB
 
   // 4.4 更新电机反馈数据（用于RLS参数辨识）
   // ⚠️ 量纲统一到输出轴侧（与功率模型k1、k2参数匹配）
@@ -819,10 +838,10 @@ void ChassisTask() {
       -motor_rb->measure.real_current * M3508_CMD_TO_CURRENT_COEFF *
           TORQUE_CONSTANT, // RB: REVERSE
   };
-  PowerUpdateMotorFeedback(motor_speeds, motor_torques);
+  PowerUpdateMotorFeedback(power_ctrl, motor_speeds, motor_torques);
 
   // 4.5 执行能量环控制和RLS更新
-  PowerControllerTask();
+  PowerControllerTask(power_ctrl);
 
   // 4.6 功率限制：对电流进行限幅
   // ⚠️ 量纲说明：
@@ -848,7 +867,7 @@ void ChassisTask() {
        .pid_max_output = 16384.0f},
   };
   float limited_output[4];
-  PowerGetLimitedOutput(motor_objs, limited_output);
+  PowerGetLimitedOutput(power_ctrl, motor_objs, limited_output);
 
   // 5. 下发电机电流指令（使用功率限制后的值）
   // ⚠️ 数组顺序：limited_output[] = {RF, LF, LB, RB}（与motors[]一致）

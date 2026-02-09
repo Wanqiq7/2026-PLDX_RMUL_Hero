@@ -46,18 +46,18 @@ void ShootInit() // 已适配四摩擦轮发射机构
           {
               .speed_PID =
                   {
-                      .Kp = 0, // 20
-                      .Ki = 0, // 1
-                      .Kd = 0,
+                      .kp = 0, // 20
+                      .ki = 0, // 1
+                      .kd = 0,
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 10000,
                       .MaxOut = 15000,
                   },
               .current_PID =
                   {
-                      .Kp = 0, // 0.7
-                      .Ki = 0, // 0.1
-                      .Kd = 0,
+                      .kp = 0, // 0.7
+                      .ki = 0, // 0.1
+                      .kd = 0,
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 10000,
                       .MaxOut = 15000,
@@ -127,25 +127,25 @@ void ShootInit() // 已适配四摩擦轮发射机构
               .angle_PID =
                   {
                       // 如果启用位置环来控制发弹,需要较大的I值保证输出力矩的线性度否则出现接近拨出的力矩大幅下降
-                      .Kp = 0, // 10
-                      .Ki = 0,
-                      .Kd = 0,
+                      .kp = 0, // 10
+                      .ki = 0,
+                      .kd = 0,
                       .MaxOut = 200,
                   },
               .speed_PID =
                   {
-                      .Kp = 0, // 10
-                      .Ki = 0, // 1
-                      .Kd = 0,
+                      .kp = 0, // 10
+                      .ki = 0, // 1
+                      .kd = 0,
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 5000,
                       .MaxOut = 5000,
                   },
               .current_PID =
                   {
-                      .Kp = 0, // 0.7
-                      .Ki = 0, // 0.1
-                      .Kd = 0,
+                      .kp = 0, // 0.7
+                      .ki = 0, // 0.1
+                      .kd = 0,
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 5000,
                       .MaxOut = 5000,
@@ -165,8 +165,8 @@ void ShootInit() // 已适配四摩擦轮发射机构
   };
   loader = DJIMotorInit(&loader_config);
 
-  shoot_pub = PubRegister("shoot_feed", sizeof(Shoot_Upload_Data_s));
-  shoot_sub = SubRegister("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
+  shoot_pub = RegisterPublisher("shoot_feed", sizeof(Shoot_Upload_Data_s));
+  shoot_sub = RegisterSubscriber("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
 }
 
 /* 机器人发射机构控制核心任务 */

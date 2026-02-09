@@ -59,9 +59,9 @@ void GimbalInit() {
           {
               .angle_PID =
                   {
-                      .Kp = 24.5f,                 // 参考旧代码手控模式
-                      .Ki = 0.92f,                 // 参考旧代码手控模式
-                      .Kd = 3.2f,                  // 参考旧代码手控模式
+                      .kp = 24.5f,                 // 参考旧代码手控模式
+                      .ki = 0.92f,                 // 参考旧代码手控模式
+                      .kd = 3.2f,                  // 参考旧代码手控模式
                       .Derivative_LPF_RC = 0.027f, // 微分滤波器，防止高频噪声
                       .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit |
                                  PID_DerivativeFilter |
@@ -73,10 +73,10 @@ void GimbalInit() {
                   },
               .speed_PID =
                   {
-                      .Kp =
+                      .kp =
                           62.5f, // 参考旧代码世界角补偿Kp=21，放大约2.4倍适配GM6020
-                      .Ki = 1.5f, // 参考旧代码有效Ki≈0.0095，放大约50倍
-                      .Kd = 0.0f, // 速度环一般不用微分，避免噪声放大
+                      .ki = 1.5f, // 参考旧代码有效Ki≈0.0095，放大约50倍
+                      .kd = 0.0f, // 速度环一般不用微分，避免噪声放大
                       .Derivative_LPF_RC = 0.002f, // 微分滤波器（虽然Kd=0）
                       .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit |
                                  PID_DerivativeFilter,
@@ -112,9 +112,9 @@ void GimbalInit() {
           {
               .angle_PID =
                   {
-                      .Kp = 12.0f,                 // 大幅降低，消除抖动
-                      .Ki = 1.5f,                  // 暂时关闭积分
-                      .Kd = 3.2f,                  // 大幅降低微分
+                      .kp = 12.0f,                 // 大幅降低，消除抖动
+                      .ki = 1.5f,                  // 暂时关闭积分
+                      .kd = 3.2f,                  // 大幅降低微分
                       .Derivative_LPF_RC = 0.015f, // 增强滤波
                       .Improve = PID_DerivativeFilter |
                                  PID_Derivative_On_Measurement |
@@ -125,9 +125,9 @@ void GimbalInit() {
                   },
               .speed_PID =
                   {
-                      .Kp = 50.0f,                // 大幅降低，消除抖动
-                      .Ki = 1.5f,                 // 暂时关闭积分，避免振荡
-                      .Kd = 0.0f,                 // 先关闭微分，等稳定后再加
+                      .kp = 50.0f,                // 大幅降低，消除抖动
+                      .ki = 1.5f,                 // 暂时关闭积分，避免振荡
+                      .kd = 0.0f,                 // 先关闭微分，等稳定后再加
                       .Derivative_LPF_RC = 0.02f, // 增强滤波（虽然Kd=0）
                       .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit |
                                  PID_DerivativeFilter |
@@ -162,8 +162,8 @@ void GimbalInit() {
   debug_yaw_motor = yaw_motor;
   debug_pitch_motor = pitch_motor;
 
-  gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
-  gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
+  gimbal_pub = RegisterPublisher("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
+  gimbal_sub = RegisterSubscriber("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
 
   // 系统辨识任务已移除（底盘板不需要云台辨识）
   // 底盘系统辨识使用独立的Chassis_SysIDTask

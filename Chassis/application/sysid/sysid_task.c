@@ -69,9 +69,9 @@ void Chassis_SysIDTaskInit(DJIMotorInstance *motor_lf,
 
   // 注册消息中心话题
   sysid_pub =
-      PubRegister("chassis_sysid_feedback", sizeof(Chassis_SysID_Feedback_s));
+      RegisterPublisher("chassis_sysid_feedback", sizeof(Chassis_SysID_Feedback_s));
   sysid_sub =
-      SubRegister("chassis_sysid_cmd", sizeof(Chassis_SysID_Ctrl_Cmd_s));
+      RegisterSubscriber("chassis_sysid_cmd", sizeof(Chassis_SysID_Ctrl_Cmd_s));
 
   // 初始化数据结构
   memset(&sysid_data, 0, sizeof(Chassis_SysID_Feedback_s));

@@ -26,23 +26,57 @@
 #define RLS_MAX_POWER_LOSS_RATIO 1.5f      // 最大功率损耗比例（相对于功率限制）
 #define RLS_COVARIANCE_TRACE_LIMIT 1000.0f // 协方差矩阵迹限制
 
-// 能量环PD控制器参数
-#define POWER_PD_KP 25.0f // 降低比例增益，减少超调
-#define POWER_PD_KD 0.0f  // 增加微分增益，增加阻尼
+// 能量环PD控制器参数（参考港科大实现）
+#define POWER_PD_KP 50.0f // 比例增益
+#define POWER_PD_KD 0.2f  // 微分增益
 
-// 功率分配参数
-#define ERROR_POWER_DISTRIBUTION_THRESHOLD 30.0f // error分配阈值上限
-#define PROP_POWER_DISTRIBUTION_THRESHOLD 20.0f  // error分配阈值下限
+// 功率分配参数（参考港科大实现）
+#define ERROR_POWER_DISTRIBUTION_THRESHOLD 20.0f // error分配阈值上限
+#define PROP_POWER_DISTRIBUTION_THRESHOLD 15.0f  // error分配阈值下限
 
-// 电容和裁判系统状态
+// 电容和裁判系统状态（参考港科大实现）
 #define REFEREE_FULL_BUFF 60.0f
-#define REFEREE_BASE_BUFF 55.0f
-#define CAP_FULL_BUFF 235.0f
-#define CAP_BASE_BUFF 50.0f
+#define REFEREE_BASE_BUFF 50.0f  // 降低以增加安全裕度
+#define CAP_FULL_BUFF 230.0f
+#define CAP_BASE_BUFF 30.0f      // 降低以增加安全裕度
 #define MAX_CAP_POWER_OUT 300.0f
 #define CAP_OFFLINE_THRESHOLD 43.0f
 
+// 错误处理参数
+#define CAP_REFEREE_BOTH_GG_COE 0.85f    // 双断连保守系数
+#define REFEREE_GG_COE 0.95f             // 裁判系统断连保守系数
+#define MOTOR_DISCONNECT_TIMEOUT 1000    // 电机断连超时计数 (ms)
+#define MIN_POWER_CONFIGURED 30.0f       // 最小功率配置值
+
+// 机器人等级最大值
+#define MAX_ROBOT_LEVEL 10
+
 /* ======================== 数据结构定义 ======================== */
+
+/**
+ * @brief 功率控制器实例（前向声明）
+ * @note 内部实现细节对App隐藏，App层仅持有指针
+ */
+typedef struct PowerControllerInstance PowerControllerInstance;
+
+/**
+ * @brief 机器人类型枚举
+ */
+typedef enum {
+  ROBOT_INFANTRY = 0, // 步兵
+  ROBOT_HERO,         // 英雄
+  ROBOT_SENTRY        // 哨兵
+} RobotDivision_e;
+
+/**
+ * @brief 错误标志枚举
+ */
+typedef enum {
+  POWER_ERROR_NONE = 0x00,
+  POWER_ERROR_MOTOR_DISCONNECT = 0x01,   // 电机断连
+  POWER_ERROR_REFEREE_DISCONNECT = 0x02, // 裁判系统断连
+  POWER_ERROR_CAP_DISCONNECT = 0x04      // 电容断连
+} PowerErrorFlags_e;
 
 /**
  * @brief 单个电机的功率对象
@@ -67,6 +101,9 @@ typedef struct {
   // 电机参数
   float torque_constant; // 电机转矩常数 (Nm/A)
   float current_scale;   // CAN指令到电流的转换系数
+
+  // 机器人类型（用于断连时查表）
+  RobotDivision_e robot_division;
 } PowerControllerConfig_t;
 
 /**
@@ -78,84 +115,132 @@ typedef struct {
   float k2; // 当前k2参数
 
   // 功率限制
-  float max_power_limit; // 当前功率上限
-  float power_upper;     // 功率上限
-  float power_lower;     // 功率下限
+  float max_power_limit;   // 当前功率上限
+  float power_upper;       // 功率上限（full）
+  float power_lower;       // 功率下限（base）
+  float referee_max_power; // 裁判系统功率限制
+  float power_upper_limit; // 功率绝对上限
 
   // 功率统计
   float estimated_power; // 估算功率
+  float measured_power;  // 实测功率
   float sum_cmd_power;   // 指令功率总和
+  float effective_power; // 有效功率（τω）
+  float power_loss;      // 功率损耗
 
   // 能量状态
-  float energy_feedback; // 能量反馈
-  uint8_t cap_online;    // 电容在线标志
+  float energy_feedback;      // 能量反馈
+  float estimated_cap_energy; // 估算电容能量
+  uint8_t cap_online;         // 电容在线标志
+  uint8_t referee_online;     // 裁判系统在线标志
 
   // 错误标志
-  uint8_t rls_enabled; // RLS使能状态
+  uint8_t error_flags;   // 错误标志位
+  uint8_t rls_enabled;   // RLS使能状态
+  uint8_t robot_level;   // 当前机器人等级
 } PowerControllerStatus_t;
 
 /* ======================== 接口函数声明 ======================== */
 
 /**
- * @brief 功率控制器初始化
+ * @brief 注册功率控制器实例
  * @param config 配置参数
- * @note 必须在调度器启动前调用
+ * @return 功率控制器实例指针，失败返回 NULL
+ * @note 符合框架规范：App层调用注册函数创建实例
  */
-void PowerControllerInit(const PowerControllerConfig_t *config);
+PowerControllerInstance *PowerControllerRegister(
+    const PowerControllerConfig_t *config);
 
 /**
  * @brief 功率控制器任务（独立任务）
+ * @param instance 功率控制器实例
  * @note 建议1-5ms周期调用，处理RLS更新和能量环控制
  */
-void PowerControllerTask(void);
+void PowerControllerTask(PowerControllerInstance *instance);
 
 /**
  * @brief 获取功率限制后的电机输出
+ * @param instance 功率控制器实例
  * @param motor_objs 四个电机的功率对象数组
  * @param output 输出数组（由调用者提供空间）
  * @note 在底盘控制任务中调用，实时性要求高
  */
-void PowerGetLimitedOutput(PowerMotorObj_t motor_objs[4], float output[4]);
+void PowerGetLimitedOutput(PowerControllerInstance *instance,
+                           PowerMotorObj_t motor_objs[4], float output[4]);
 
 /**
  * @brief 更新裁判系统数据
+ * @param instance 功率控制器实例
  * @param chassis_power_limit 底盘功率上限
  * @param chassis_power_buffer 功率缓冲
  * @param chassis_power 当前功率
  */
-void PowerUpdateRefereeData(float chassis_power_limit,
+void PowerUpdateRefereeData(PowerControllerInstance *instance,
+                            float chassis_power_limit,
                             float chassis_power_buffer, float chassis_power);
 
 /**
  * @brief 更新超级电容数据
- * @param cap_voltage 电容电压 (0-255)
+ * @param instance 功率控制器实例
+ * @param cap_energy 电容能量百分比 (0-255, 255表示100%)
  * @param cap_online 电容在线标志
  */
-void PowerUpdateCapData(uint8_t cap_voltage, uint8_t cap_online);
+void PowerUpdateCapData(PowerControllerInstance *instance, uint8_t cap_energy,
+                        uint8_t cap_online);
 
 /**
  * @brief 更新电机反馈数据
+ * @param instance 功率控制器实例
  * @param motor_speeds 电机转速数组 (rad/s)
  * @param motor_torques 电机转矩数组 (Nm)
  */
-void PowerUpdateMotorFeedback(float motor_speeds[4], float motor_torques[4]);
+void PowerUpdateMotorFeedback(PowerControllerInstance *instance,
+                              float motor_speeds[4], float motor_torques[4]);
 
 /**
  * @brief 获取功率控制器状态
+ * @param instance 功率控制器实例
  * @return 功率控制器状态结构体指针
  */
-const PowerControllerStatus_t *PowerGetStatus(void);
+const PowerControllerStatus_t *PowerGetStatus(PowerControllerInstance *instance);
 
 /**
  * @brief 设置RLS使能状态
+ * @param instance 功率控制器实例
  * @param enable 1:使能, 0:禁用
  */
-void PowerSetRLSEnable(uint8_t enable);
+void PowerSetRLSEnable(PowerControllerInstance *instance, uint8_t enable);
 
 /**
  * @brief 设置用户自定义功率限制
+ * @param instance 功率控制器实例
  * @param power_limit 功率限制值 (W)
  */
-void PowerSetUserLimit(float power_limit);
+void PowerSetUserLimit(PowerControllerInstance *instance, float power_limit);
+
+/**
+ * @brief 更新裁判系统在线状态
+ * @param instance 功率控制器实例
+ * @param online 1:在线, 0:离线
+ * @param robot_level 机器人等级 (1-10)
+ */
+void PowerUpdateRefereeOnline(PowerControllerInstance *instance, uint8_t online,
+                              uint8_t robot_level);
+
+/**
+ * @brief 更新电机在线状态
+ * @param instance 功率控制器实例
+ * @param motor_index 电机索引 (0-3)
+ * @param online 1:在线, 0:离线
+ */
+void PowerUpdateMotorOnline(PowerControllerInstance *instance,
+                            uint8_t motor_index, uint8_t online);
+
+/**
+ * @brief 获取当前错误标志
+ * @param instance 功率控制器实例
+ * @return 错误标志位
+ */
+uint8_t PowerGetErrorFlags(PowerControllerInstance *instance);
 
 #endif // POWER_CONTROLLER_H

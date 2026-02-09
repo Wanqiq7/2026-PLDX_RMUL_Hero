@@ -13,17 +13,41 @@
 #define ROBOT_DEF_H
 
 #include "ins_task.h"
-#include "master_process.h"
 #include "math.h"
 #include "stdint.h"
+#include "vision_comm.h"
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义!
  */
 // #define ONE_BOARD // 单板控制整车
 // #define CHASSIS_BOARD // 底盘板
 #define GIMBAL_BOARD // 云台板
+
+/* -------------------------视觉通信链路选择------------------------- */
+/**
+ * @brief 视觉链路选择开关（编译期）
+ * @note 默认使用 CAN，如需改回 USB 虚拟串口（VCP），请将 VISION_LINK_TYPE 设为
+ * VISION_LINK_VCP。 CAN 协议对齐 sp_vision_25-main 的
+ * io/cboard.cpp（quaternion_canid / bullet_speed_canid / send_canid）。
+ */
+#define VISION_LINK_VCP 0
+#define VISION_LINK_CAN 1
+
+#ifndef VISION_LINK_TYPE
+#define VISION_LINK_TYPE VISION_LINK_VCP
+#endif
+
+/**
+ * @brief CAN 视觉链路参数（仅在 VISION_LINK_TYPE==VISION_LINK_CAN 时生效）
+ * @note CAN
+ * 参数已下沉到视觉通信模块（`modules/vision_comm/vision_comm.h`）中统一管理。
+ */
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾
  */
+// 控制周期参数
+#define ROBOT_CTRL_PERIOD_S 0.001f   // 主控制周期 [s]，对应1kHz
+#define VISION_CTRL_PERIOD_S 0.001f  // 视觉控制周期 [s]，与主控制同步
+
 // 云台参数
 #define YAW_CHASSIS_ALIGN_ECD                                                  \
   5695 // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
@@ -136,6 +160,8 @@ typedef enum {
   GIMBAL_ZERO_FORCE = 0, // 电流零输入
   GIMBAL_FREE_MODE, // 云台自由运动模式,即与底盘分离(底盘此时应为NO_FOLLOW)反馈值为电机total_angle;似乎可以改为全部用IMU数据?
   GIMBAL_GYRO_MODE, // 云台陀螺仪反馈模式,反馈值为陀螺仪pitch,total_yaw_angle,底盘可以为小陀螺和跟随模式
+  GIMBAL_AUTOAIM_MODE, // 自瞄模式：Yaw 视觉双环（直出电流），Pitch
+                       // 视觉参考限速（MIT位置刚度）
   GIMBAL_LQR_MODE, // 云台LQR控制模式,Yaw轴使用LQR最优控制,Pitch轴使用PID(或LQR)
   GIMBAL_SYS_ID_CHIRP, // 云台正弦扫频辨识模式,用于系统辨识和PID整定
 } gimbal_mode_e;
@@ -207,10 +233,12 @@ typedef struct { // 云台角度控制
   float chassis_rotate_wz;
 
   gimbal_mode_e gimbal_mode;
-  float yaw_vel_ff;   // 未启用的yaw速度前馈(弧度/秒)
-  float yaw_acc_ff;   // 未启用的yaw加速度前馈(弧度/秒^2)
-  float pitch_vel_ff; // 未启用的pitch速度前馈(弧度/秒)
-  float pitch_acc_ff; // 未启用的pitch加速度前馈(弧度/秒^2)
+
+  // 视觉直接控制字段（由robot_cmd从vision_data填充）
+  uint8_t vision_yaw_direct;   // 是否使用视觉Yaw电流直接控制
+  float vision_yaw_current;    // 视觉Yaw电流指令 [raw]
+  uint8_t vision_pitch_direct; // 是否使用视觉Pitch目标
+  float vision_pitch_ref;      // 视觉Pitch目标角度 [rad]
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -268,13 +296,16 @@ typedef struct {
 typedef struct {
   uint8_t vision_valid;  // 视觉数据有效标志
   uint8_t target_locked; // 目标锁定标志
-  float yaw;             // 目标yaw角度(弧度)
-  float pitch;           // 目标pitch角度(弧度)
   uint8_t should_fire;   // 建议射击标志
-  float yaw_vel_ff;      // 目标yaw角速度前馈(弧度/秒)
-  float yaw_acc_ff;      // 目标yaw角加速度前馈(弧度/秒^2)
-  float pitch_vel_ff;    // 目标pitch角速度前馈(弧度/秒)
-  float pitch_acc_ff;    // 目标pitch角加速度前馈(弧度/秒^2)
+
+  // 视觉控制输出（由vision_controller计算）
+  uint8_t vision_takeover; // 视觉接管标志
+  float yaw_current_cmd;   // Yaw电流指令 [raw]（视觉双环输出）
+  float pitch_ref_limited; // Pitch目标角度 [rad]（限速后）
+
+  // 原始视觉目标（用于调试/备用）
+  float yaw;   // 原始目标yaw角度 [rad]
+  float pitch; // 原始目标pitch角度 [rad]
 } Vision_Upload_Data_s;
 
 /* ----------------系统辨识任务相关定义----------------*/

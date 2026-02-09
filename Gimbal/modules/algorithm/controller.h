@@ -53,9 +53,9 @@ typedef struct {
 typedef struct {
   //---------------------------------- init config block
   // config parameter
-  float Kp;
-  float Ki;
-  float Kd;
+  float kp;
+  float ki;
+  float kd;
   float MaxOut;
   float DeadBand;
 
@@ -96,9 +96,9 @@ typedef struct {
 typedef struct // config parameter
 {
   // basic parameter
-  float Kp;
-  float Ki;
-  float Kd;
+  float kp;
+  float ki;
+  float kd;
   float MaxOut;   // 输出限幅
   float DeadBand; // 死区
 
@@ -144,6 +144,7 @@ typedef struct {
   float k2;             // 滑模面系数2
   float alpha;          // 趋近律系数alpha
   float beta;           // 趋近律系数beta
+  float epsilon;        // 边界层厚度（减小抖振）
   float max_out;        // 最大输出限幅
   float feedforward_k1; // 前馈系数1
   float feedforward_k2; // 前馈系数2
@@ -172,6 +173,7 @@ typedef struct {
   float k2;             // 滑模面系数2
   float alpha;          // 趋近律系数alpha
   float beta;           // 趋近律系数beta
+  float epsilon;        // 边界层厚度（减小抖振，默认0.1）
   float max_out;        // 最大输出限幅
   float feedforward_k1; // 前馈系数1
   float feedforward_k2; // 前馈系数2
@@ -197,6 +199,13 @@ void SMCInit(SMCInstance *smc, SMC_Init_Config_s *config);
 float SMCCalculate(SMCInstance *smc, float measure, float measure_vel,
                    float ref);
 
+/**
+ * @brief 重置SMC滑模控制器状态
+ *
+ * @param smc SMC实例指针
+ */
+void SMCReset(SMCInstance *smc);
+
 /* LQR线性二次调节器结构体 */
 typedef struct {
   //---------------------------------- init config block
@@ -212,6 +221,7 @@ typedef struct {
   float integral_limit;      // 积分限幅
   float integral_deadband;   // 积分死区 [rad]
   float integral_decay_coef; // 积分衰减系数 (变增益积分)
+  float integral_decay_threshold; // 积分衰减阈值 [rad]，误差超过此值时衰减积分
 
   //-----------------------------------
   // for calculating
@@ -241,6 +251,7 @@ typedef struct {
   float integral_limit;      // 积分限幅
   float integral_deadband;   // 积分死区 [rad]
   float integral_decay_coef; // 积分衰减系数 (0-1, 用于变增益积分)
+  float integral_decay_threshold; // 积分衰减阈值 [rad]，默认0.3（约17度）
 } LQR_Init_Config_s;
 
 /**

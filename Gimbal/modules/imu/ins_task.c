@@ -15,14 +15,15 @@
 #include "QuaternionEKF.h"
 #include "controller.h"
 #include "general_def.h"
-#include "master_process.h"
-#include "spi.h"
-#include "tim.h"
+#include "bsp_pwm.h"
+#include "spi.h"  // TODO: BMI088 驱动重构后移除此依赖
 #include "user_lib.h"
+#include "vision_comm.h"
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
 static PIDInstance TempCtrl = {0};
+static PWMInstance *imu_heat_pwm = NULL; // IMU 恒温 PWM 实例
 
 const float xb[3] = {1, 0, 0};
 const float yb[3] = {0, 1, 0};
@@ -37,7 +38,12 @@ static void IMU_Param_Correction(IMU_Param_t *param, float gyro[3],
                                  float accel[3]);
 
 static void IMUPWMSet(uint16_t pwm) {
-  __HAL_TIM_SetCompare(&htim10, TIM_CHANNEL_1, pwm);
+  if (imu_heat_pwm != NULL) {
+    // 将 0~2000 的 PWM 值转换为 0~1 的占空比
+    float duty = (float)pwm / 2000.0f;
+    if (duty > 1.0f) duty = 1.0f;
+    PWMSetDutyRatio(imu_heat_pwm, duty);
+  }
 }
 
 /**
@@ -81,7 +87,17 @@ attitude_t *INS_Init(void) {
   else
     return (attitude_t *)&INS.Gyro;
 
-  HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
+  // 使用 BSP PWM 接口初始化 IMU 恒温加热器
+  PWM_Init_Config_s pwm_config = {
+    .htim = &htim10,
+    .channel = TIM_CHANNEL_1,
+    .period = 0.001f,    // 1ms 周期
+    .dutyratio = 0,      // 初始占空比 0
+    .callback = NULL,
+    .id = NULL
+  };
+  imu_heat_pwm = PWMRegister(&pwm_config);
+  PWMStart(imu_heat_pwm);
 
   while (BMI088Init(&hspi1, 1) != BMI088_NO_ERROR)
     ;
@@ -100,9 +116,9 @@ attitude_t *INS_Init(void) {
   PID_Init_Config_s config = {.MaxOut = 2000,
                               .IntegralLimit = 300,
                               .DeadBand = 0,
-                              .Kp = 1000,
-                              .Ki = 20,
-                              .Kd = 0,
+                              .kp = 1000,
+                              .ki = 20,
+                              .kd = 0,
                               .Improve = 0x01}; // enable integratiaon limit
   PIDInit(&TempCtrl, &config);
 
@@ -169,6 +185,7 @@ void INS_Task(void) {
 
     // 同步弧度制数据
     INS.Pitch_rad = QEKF_INS.Pitch_rad;
+    INS.YawAngle_rad = QEKF_INS.Yaw_rad;
     INS.YawTotalAngle_rad = QEKF_INS.YawTotalAngle_rad;
 
     VisionSendIMUPacket(QEKF_INS.q, QEKF_INS.Yaw_rad, INS.Gyro[Z],
