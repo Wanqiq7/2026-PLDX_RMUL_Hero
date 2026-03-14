@@ -110,6 +110,7 @@ typedef enum {
 
 typedef enum {
   BULLET_SPEED_NONE = 0,
+  SMALL_AMU_12 = 12,
   BIG_AMU_10 = 10,
   SMALL_AMU_15 = 17,
   BIG_AMU_16 = 16,
@@ -124,4 +125,3 @@ void VisionSendIMUPacket(const float q[4], float yaw, float yaw_vel,
                          float pitch, float pitch_vel);
 
 #endif // !VISION_COMM_H
-

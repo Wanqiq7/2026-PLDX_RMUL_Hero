@@ -9,13 +9,13 @@
  * - Pitch：限速/限幅参考生成，避免目标突跳
  */
 
+#include "vision.h"
 #include "bsp_log.h"
 #include "ins_task.h"
 #include "message_center.h"
+#include "robot_def.h"
 #include "vision_comm.h"
 #include "vision_control.h"
-#include "vision.h"
-#include "robot_def.h"
 
 /* ==================== 常量定义 ==================== */
 static volatile VisionCtrlParams_s vision_params = {
@@ -40,19 +40,17 @@ static Vision_Recv_s *vision_recv_data; // 来自 vision_comm 的视觉原始数
 // 消息中心相关
 static Publisher_t *vision_pub;       // 发布处理后的视觉数据
 static Subscriber_t *vision_sub;      // 订阅来自 cmd 的视觉控制指令
-static Subscriber_t *shoot_cmd_sub;   // 订阅发射控制指令
 static Subscriber_t *gimbal_feed_sub; // 订阅云台反馈（获取IMU数据）
 
 static Vision_Ctrl_Cmd_s vision_cmd_recv;       // 接收的控制指令
 static Vision_Upload_Data_s vision_upload_data; // 发布的处理数据
-static Shoot_Ctrl_Cmd_s shoot_cmd_cache;        // 发射参数缓存
 static Gimbal_Upload_Data_s gimbal_feed_recv;   // 云台反馈数据（含IMU）
 
 // 状态变量
-static uint8_t vision_last_online_state = 0; // 上一次在线状态
-static uint16_t vision_bullet_count = 0;     // 弹丸计数
-static uint8_t vision_takeover_last = 0;     // 上一次视觉接管状态
-static uint8_t vision_link_ready = 0;        // 视觉链路初始化完成标志
+static uint8_t vision_last_online_state = 0;  // 上一次在线状态
+static uint16_t vision_bullet_count = 0;      // 弹丸计数
+static uint8_t vision_takeover_last = 0;      // 上一次视觉接管状态
+static uint8_t vision_link_ready = 0;         // 视觉链路初始化完成标志
 static uint8_t vision_init_failed_logged = 0; // 初始化失败日志保护
 
 // 控制器状态
@@ -88,20 +86,6 @@ static uint8_t VisionModeToProtocol(vision_mode_e mode) {
   }
 }
 
-static float ConvertBulletSpeed(Bullet_Speed_e speed) {
-  switch (speed) {
-  case BIG_AMU_10:
-  case SMALL_AMU_15:
-  case BIG_AMU_16:
-  case SMALL_AMU_18:
-  case SMALL_AMU_30:
-    return (float)speed;
-  case BULLET_SPEED_NONE:
-  default:
-    return 0.0f;
-  }
-}
-
 /**
  * @brief 视觉控制应用初始化
  */
@@ -110,9 +94,9 @@ void VisionAppInit(void) {
   // link_type: VISION_LINK_VCP (USB) 或 VISION_LINK_CAN (CAN总线)
   // can_bus: 1 或 2，仅 CAN 模式有效
   Vision_Init_Config_s vision_config = {
-      .link_type = VISION_LINK_VCP,  // 默认使用 USB VCP
-      .can_bus = 1,                   // CAN1（仅 CAN 模式有效）
-      .reload_count = 10,             // 100ms 超时
+      .link_type = (Vision_Link_Type_e)VISION_LINK_TYPE, // 运行时跟随编译配置
+      .can_bus = 1,                                     // CAN1（仅 CAN 模式有效）
+      .reload_count = 10,                               // 100ms 超时
   };
   vision_recv_data = VisionInit(&vision_config);
   if (vision_recv_data == NULL) {
@@ -136,12 +120,8 @@ void VisionAppInit(void) {
     LOGERROR("[vision] Failed to register vision_cmd subscriber!");
   }
 
-  shoot_cmd_sub = RegisterSubscriber("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
-  if (shoot_cmd_sub == NULL) {
-    LOGERROR("[vision] Failed to register shoot_cmd subscriber!");
-  }
-
-  gimbal_feed_sub = RegisterSubscriber("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
+  gimbal_feed_sub =
+      RegisterSubscriber("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
   if (gimbal_feed_sub == NULL) {
     LOGERROR("[vision] Failed to register gimbal_feed subscriber!");
   }
@@ -158,7 +138,6 @@ void VisionAppInit(void) {
 void VisionAppTask(void) {
   // 获取来自 robot_cmd 的控制指令和云台反馈
   SubGetMessage(vision_sub, &vision_cmd_recv);
-  SubGetMessage(shoot_cmd_sub, &shoot_cmd_cache);
   SubGetMessage(gimbal_feed_sub, &gimbal_feed_recv);
 
   if (!vision_link_ready) {
@@ -173,7 +152,7 @@ void VisionAppTask(void) {
 
   // 更新发送给视觉的模式与弹速（姿态由 INS_Task 1kHz 推送）
   VisionUpdateTxAux(VisionModeToProtocol(vision_cmd_recv.vision_mode),
-                    ConvertBulletSpeed(shoot_cmd_cache.bullet_speed),
+                    12.0f,
                     vision_bullet_count);
 
   // 检查视觉在线状态
@@ -350,11 +329,10 @@ static void ClearVisionOutput(void) {
 /**
  * @brief 角度归一化到[-π, π]
  */
-static void VisionControllerInit(void) {
-  VisionCtrlInit(&vision_ctrl_state);
-}
+static void VisionControllerInit(void) { VisionCtrlInit(&vision_ctrl_state); }
 
 static void VisionControllerReset(float pitch_feedback_rad) {
   VisionCtrlReset(&vision_ctrl_state,
-                  (const VisionCtrlParams_s *)&vision_params, pitch_feedback_rad);
+                  (const VisionCtrlParams_s *)&vision_params,
+                  pitch_feedback_rad);
 }

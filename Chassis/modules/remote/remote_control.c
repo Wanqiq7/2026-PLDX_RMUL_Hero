@@ -110,6 +110,7 @@ static void RCLostCallback(void *id)
 RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle)
 {
     USART_Init_Config_s conf;
+    memset(&conf, 0, sizeof(conf));
     conf.module_callback = RemoteControlRxCallback;
     conf.usart_handle = rc_usart_handle;
     conf.recv_buff_size = REMOTE_CONTROL_FRAME_SIZE;

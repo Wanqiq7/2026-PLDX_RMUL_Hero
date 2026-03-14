@@ -1,80 +1,178 @@
 # bsp_usart
 
-<p align='right'>neozng1@hnu.edu.cn</p>
+> 当前版本的 USART BSP 已从“单次 DMA 接收 + 直接 `recv_buff` 解包”升级为“环形 DMA RX + 软件 FIFO + TX 队列/双缓冲”的异步架构，同时保留对 legacy fixed-length 模块的兼容层。
 
-> TODO: 增加发送队列以解决短时间内调用`USARTSend()`发生丢包的问题,目前仅支持DMA。还需要提供阻塞和IT模式以供选择，参考bspiic和spi进行实现。
-> 可以直接在发送函数的参数列表添加发送模式选择,或增加instance成员变量,并提供设置模式接口,两者各有优劣
+## 总体说明
 
-## 使用说明
+- RX 架构：
+  `DMA_CIRCULAR + HAL_UARTEx_ReceiveToIdle_DMA + NDTR 增量提取 + 软件 FIFO`
+- TX 架构：
+  `数据 FIFO + 请求元信息队列 + 双缓冲 DMA + TxCplt handoff`
+- 兼容策略：
+  旧模块仍可通过 `recv_buff + module_callback` 工作，但这条路径只适用于**固定帧**协议。
+- 推荐路径：
+  新模块应使用 `USARTRead()` / `USARTWrite()` 与 `BLOCK/CALLBACK/POLLING` 操作模型，不再依赖直接访问 `recv_buff`。
 
-若你需要构建新的基于串口的module，首先需要拥有一个`usart_instance`的指针用于操作串口对象。
+## 分层约束
 
-需要在串口实例下设定接收的数据包的长度，实例对应的串口硬件（通过`UART_HandleTypeDef`指定，如`&huart1`），解析接收数据对应的回调函数这三个参数。然后，调用`USARTRegister()`并传入配置好的`usart_instance`指针即可。
-
-若要发送数据，调用`USARTSend()`。注意buffsize务必小于你创建的buff的大小，否则造成指针越界后果未知。
-
-串口硬件收到数据时，会将其存入`usart_instance.recv_buff[]`中，当收到完整一包数据，会调用设定的回调函数`module_callback`（即你注册时提供的解析函数）。在此函数中，你可以通过`usart_instance.recv_buff[]`访问串口收到的数据。
+- HAL 调用只允许出现在 `bsp/usart/bsp_usart.c`
+- Module 层只能通过 `USARTRegister/USARTRead/USARTWrite/USARTSend/USARTServiceInit` 等 BSP 接口使用串口
+- 禁止在临界区中延时
+- RX/TX 共享状态必须使用 ISR-safe 机制保护
 
 ## 代码结构
 
-.h文件内包括了外部接口和类型定义,以及模块对应的宏。c文件内为私有函数和外部接口的定义。
+- [bsp_usart.h](D:/RoboMaster/HeroCode/Code/Chassis/bsp/usart/bsp_usart.h)
+  对外公开接口、状态枚举、操作对象、实例定义与 legacy 包装声明
+- [bsp_usart_async.h](D:/RoboMaster/HeroCode/Code/Chassis/bsp/usart/bsp_usart_async.h)
+  C 版 `libxr_rw` 等价基础设施声明：FIFO、请求队列、双缓冲、读写端口
+- [bsp_usart_async.c](D:/RoboMaster/HeroCode/Code/Chassis/bsp/usart/bsp_usart_async.c)
+  队列、端口、operation、pending 完成路径等纯软件逻辑
+- [bsp_usart.c](D:/RoboMaster/HeroCode/Code/Chassis/bsp/usart/bsp_usart.c)
+  HAL 绑定、DMA 启停、RxEvent 增量提取、legacy fixed-length 兼容分发、TX kick/完成回调
 
-## 类型定义
+## 类型与接口
+
+### 状态与操作类型
+
+- `USART_Status_e`
+  串口读写操作的统一返回状态，覆盖 `OK/PENDING/BUSY/FULL/EMPTY/TIMEOUT/FAILED`
+- `USART_Operation_Type_e`
+  对齐 `libxr_rw` 的三种模式：
+  `BLOCK / CALLBACK / POLLING`
+- `USART_Polling_Status_e`
+  轮询模式状态：
+  `READY / RUNNING / DONE / ERROR`
+
+### 操作对象
+
+`USART_Operation_s` 用于描述一次读/写操作的完成方式：
+
+- `CALLBACK`
+  完成时调用 `usart_operation_callback`
+- `BLOCK`
+  任务上下文阻塞等待完成
+- `POLLING`
+  外部通过状态变量轮询完成结果
+
+提供的初始化辅助接口：
+
+- `USARTOperationInitCallback()`
+- `USARTOperationInitBlock()`
+- `USARTOperationInitPolling()`
+- `USARTOperationInitNone()`
+
+### 实例与兼容边界
+
+`USARTInstance` 同时包含两套语义：
+
+- legacy 语义：
+  `recv_buff`、`rx_data_len`、`recv_buff_size`、`module_callback`
+- 新架构语义：
+  `owner_id`、`rx_fifo_size`、`tx_fifo_size`、`tx_queue_depth`、`read_port`、`write_port`、`driver_context`
+
+其中：
+
+- `owner_id` 参考 `bsp_can` 的 parent pointer 设计，用于让底层实例知道自己属于哪个 module
+- `read_port` / `write_port` 是唯一推荐的新接口入口
+- `driver_context` 是 BSP 私有上下文，Module 层禁止访问
+
+## RX 工作流程
+
+1. `USARTRegister()` 初始化实例、软件 FIFO、TX 双缓冲和驱动上下文
+2. `USARTServiceInit()` 将 `hdmarx` 设为 `DMA_CIRCULAR`，并启动一次 `HAL_UARTEx_ReceiveToIdle_DMA`
+3. `HAL_UARTEx_RxEventCallback()` 通过 `NDTR` 计算当前 DMA 写指针
+4. 根据 `curr_pos` 和 `last_pos` 提取线性区或回卷区新字节
+5. 新字节被推入 `read_port` 的软件 FIFO
+6. 若该实例仍在使用 legacy fixed-length 模式，BSP 会在 FIFO 中凑满 `recv_buff_size` 后复制到 `recv_buff` 并触发 `module_callback`
+7. 新模块则通过 `USARTRead()` 主动消费 FIFO 中的数据
+
+## TX 工作流程
+
+1. `USARTWrite()` 将数据写入 TX 数据 FIFO，并把操作信息写入请求队列
+2. `USARTWritePortKick()` 在 UART 空闲时装载 active buffer 并启动 DMA 发送
+3. 若发送过程中有后续数据进入，则预装入 pending buffer
+4. `HAL_UART_TxCpltCallback()` 完成 active request，并切换/推进下一帧发送
+
+## legacy 兼容策略
+
+当前仍可直接工作的模块类型：
+
+- `remote_control`
+- `HC05`
+- `master_process`
+- `servo_motor`
+
+兼容前提：
+
+- 协议是固定帧
+- 初始化时必须把 `USART_Init_Config_s` **零初始化**
+- 只依赖 `recv_buff` 和 `module_callback`
+
+不再推荐的旧假设：
+
+- “每收到一包就重挂一次 DMA”
+- “TX DMA 会天然打断 RX DMA，因此必须用 IT 发送”
+- “在 UART 回调里直接做复杂协议解析”
+
+## 推荐使用方式
+
+### fixed-length 旧模块
 
 ```c
-#define DEVICE_USART_CNT 3     // C板至多分配3个串口
-#define USART_RXBUFF_LIMIT 128 // if your protocol needs bigger buff, modify here
-
-typedef void (*usart_module_callback)();
-
-/* usart_instance struct,each app would have one instance */
-typedef struct
-{
-    uint8_t recv_buff[USART_RXBUFF_LIMIT]; // 预先定义的最大buff大小,如果太小请修改USART_RXBUFF_LIMIT
-    uint8_t recv_buff_size;                // 模块接收一包数据的大小
-    UART_HandleTypeDef *usart_handle;      // 实例对应的usart_handle
-    usart_module_callback module_callback; // 解析收到的数据的回调函数
-} usart_instance;
+USART_Init_Config_s conf;
+memset(&conf, 0, sizeof(conf));
+conf.usart_handle = &huart3;
+conf.recv_buff_size = 18U;
+conf.module_callback = RemoteControlRxCallback;
+USARTRegister(&conf);
 ```
 
-- `DEVICE_USART_CNT`是开发板上可用的串口数量。
-
-- `USART_RXBUFF_LIMIT`是串口单次接收的数据长度上限，暂时设为128，如果需要更大的buffer容量，修改该值。
-
-- `usart_module_callback()`是模块提供给串口接收中断回调函数使用的协议解析函数指针。对于每个需要串口的模块，需要定义一个这样的函数用于解包数据。
-
-- 每定义一个`usart_instance`，就代表一个串口的**实例**（对象）。一个串口实例内有接收buffer，单个数据包的大小，该串口对应的`HAL handle`（代表其使用的串口硬件具体是哪一个）以及用于解包数据的回调函数。
-
-
-## 外部接口
+### 新模块使用 POLLING 读
 
 ```c
-void USARTRegister(usart_instance *_instance);
-void USARTSend(usart_instance *_instance, uint8_t *send_buf, uint16_t send_size);
+USART_Operation_s op;
+volatile USART_Polling_Status_e status;
+
+USARTOperationInitPolling(&op, &status);
+if (USARTRead(usart_instance, recv_buf, expect_len, &op, 0U) == USART_STATUS_PENDING) {
+    if (status == USART_POLLING_DONE) {
+        // 任务上下文处理收到的数据
+    }
+}
 ```
 
-- `USARTRegister`是用于初始化串口对象的接口，module层的模块对象（也应当为一个结构体）内要包含一个`usart_instance`。
-
-  **在调用该函数之前，需要先对其成员变量`*usart_handle`,`module_callback()`以及`recv_buff_size`进行赋值。**
-
-- `USARTSend()`是通过模块通过其拥有的串口对象发送数据的接口，调用时传入的参数为串口实例指针，发送缓存以及此次要发送的数据长度（8-bit\*n)。
-
-## 私有函数和变量
-
-在.c文件内设为static的函数和变量
+### 新模块发送
 
 ```c
-static usart_instance *instance[DEVICE_USART_CNT];
+USART_Operation_s op;
+USARTOperationInitNone(&op);
+USARTWrite(usart_instance, send_buf, send_len, &op, 0U);
 ```
 
-这是bsp层管理所有串口实例的入口。
+## 模块迁移建议
 
-```c
-static void USARTServiceInit(usart_instance *_instance)
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
-```
+- fixed-length 模块：
+  短期保留 legacy callback，先把 `USART_Init_Config_s` 改为零初始化
+- 准固定帧模块：
+  可逐步从 `recv_buff` 迁移到 `USARTRead(..., POLLING/CALLBACK)`
+- 变长流式协议：
+  必须迁移到新读接口，避免继续依赖 `recv_buff`
+- 裁判系统：
+  已迁移为任务上下文中的流式状态机，不再在 UART ISR 内解包
 
-- `USARTServiceInit()`会被`USARTRegister()`调用，开启接收中断
+## 调试与验收
 
-- `HAL_UARTEx_RxEventCallback()`和`HAL_UART_ErrorCallback()`都是对HAL的回调函数的重定义（原本的callback是`__week`修饰的弱定义），前者在发生**IDLE中断**或**单次DMA传输中断**后会被调用（说明收到了完整的一包数据），随后在里面根据中断来源，调用拥有产生了该中断的模块的协议解析函数进行数据解包；后者在串口传输出错的时候会被调用，重新开启接收。
+最低验收建议：
+
+1. 单独编译 `bsp_usart_async.o` 与 `bsp_usart.o`
+2. 编译依赖 legacy 兼容层的固定帧模块对象
+3. 编译 `rm_referee.o` 与 `referee_task.o`
+4. 全量构建时，区分 USART 迁移新增问题与仓库既有问题
+
+重点检查项：
+
+- `HAL` 调用未外溢到 Module/APP
+- 临界区中无延时
+- FIFO/队列满时有安全检查或告警
+- `USART_Init_Config_s` 的栈变量使用前均已清零

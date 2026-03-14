@@ -17,8 +17,8 @@
 
 /* ======================== 配置宏定义 ======================== */
 // 使能开关
-#define POWER_CONTROLLER_ENABLE 0 // 功率控制总开关
-#define RLS_ENABLE 0              // RLS参数辨识使能
+#define POWER_CONTROLLER_ENABLE 0 // 功率控制总开关（调试力控PID时关闭）
+#define RLS_ENABLE 0              // RLS参数辨识使能（调试力控PID时关闭）
 
 // RLS保护参数（防止协方差爆炸）
 #define RLS_MIN_TORQUE_SQ 0.08f            // 最小力矩平方和阈值 (Nm²)
@@ -27,8 +27,9 @@
 #define RLS_COVARIANCE_TRACE_LIMIT 1000.0f // 协方差矩阵迹限制
 
 // 能量环PD控制器参数（参考港科大实现）
-#define POWER_PD_KP 50.0f // 比例增益
-#define POWER_PD_KD 0.2f  // 微分增益
+#define POWER_PD_KP 50.0f          // 比例增益
+#define POWER_PD_KD 0.20f          // 微分增益（恢复阻尼）
+#define POWER_PD_D_FILTER_ALPHA 0.3f // 微分项低通滤波系数(0~1)
 
 // 功率分配参数（参考港科大实现）
 #define ERROR_POWER_DISTRIBUTION_THRESHOLD 20.0f // error分配阈值上限
@@ -36,17 +37,17 @@
 
 // 电容和裁判系统状态（参考港科大实现）
 #define REFEREE_FULL_BUFF 60.0f
-#define REFEREE_BASE_BUFF 50.0f  // 降低以增加安全裕度
+#define REFEREE_BASE_BUFF 50.0f // 降低以增加安全裕度
 #define CAP_FULL_BUFF 230.0f
-#define CAP_BASE_BUFF 30.0f      // 降低以增加安全裕度
+#define CAP_BASE_BUFF 30.0f // 降低以增加安全裕度
 #define MAX_CAP_POWER_OUT 300.0f
 #define CAP_OFFLINE_THRESHOLD 43.0f
 
 // 错误处理参数
-#define CAP_REFEREE_BOTH_GG_COE 0.85f    // 双断连保守系数
-#define REFEREE_GG_COE 0.95f             // 裁判系统断连保守系数
-#define MOTOR_DISCONNECT_TIMEOUT 1000    // 电机断连超时计数 (ms)
-#define MIN_POWER_CONFIGURED 30.0f       // 最小功率配置值
+#define CAP_REFEREE_BOTH_GG_COE 0.85f // 双断连保守系数
+#define REFEREE_GG_COE 0.95f          // 裁判系统断连保守系数
+#define MOTOR_DISCONNECT_TIMEOUT 1000 // 电机断连超时计数 (ms)
+#define MIN_POWER_CONFIGURED 30.0f    // 最小功率配置值
 
 // 机器人等级最大值
 #define MAX_ROBOT_LEVEL 10
@@ -115,29 +116,29 @@ typedef struct {
   float k2; // 当前k2参数
 
   // 功率限制
-  float max_power_limit;   // 当前功率上限
-  float power_upper;       // 功率上限（full）
-  float power_lower;       // 功率下限（base）
-  float referee_max_power; // 裁判系统功率限制
-  float power_upper_limit; // 功率绝对上限
+  float allowed_power_w; // 当前实际生效的功率上限
+  float upper_limit_w;   // 上限缓冲线（full）
+  float lower_limit_w;   // 下限缓冲线（base）
+  float ref_limit_w;     // 当前参考功率上限（优先来自裁判）
+  float hard_limit_w;    // 当前绝对硬上限（含超电放宽）
 
   // 功率统计
-  float estimated_power; // 估算功率
-  float measured_power;  // 实测功率
-  float sum_cmd_power;   // 指令功率总和
-  float effective_power; // 有效功率（τω）
-  float power_loss;      // 功率损耗
+  float est_power_w;      // 估算功率
+  float measured_power_w; // 实测功率
+  float cmd_power_sum_w;  // 指令功率总和
+  float mech_power_w;     // 有效机械功率（τω）
+  float loss_power_w;     // 功率损耗
 
   // 能量状态
-  float energy_feedback;      // 能量反馈
-  float estimated_cap_energy; // 估算电容能量
-  uint8_t cap_online;         // 电容在线标志
+  float buffer_feedback; // 当前用于能量环的缓冲反馈量
+  float cap_energy_est;  // 统一量纲后的估算储能状态
+  uint8_t cap_online;         // 超级电容在线标志
   uint8_t referee_online;     // 裁判系统在线标志
 
   // 错误标志
-  uint8_t error_flags;   // 错误标志位
-  uint8_t rls_enabled;   // RLS使能状态
-  uint8_t robot_level;   // 当前机器人等级
+  uint8_t error_flags; // 错误标志位
+  uint8_t rls_enabled; // RLS使能状态
+  uint8_t robot_level; // 当前机器人等级
 } PowerControllerStatus_t;
 
 /* ======================== 接口函数声明 ======================== */
@@ -148,8 +149,8 @@ typedef struct {
  * @return 功率控制器实例指针，失败返回 NULL
  * @note 符合框架规范：App层调用注册函数创建实例
  */
-PowerControllerInstance *PowerControllerRegister(
-    const PowerControllerConfig_t *config);
+PowerControllerInstance *
+PowerControllerRegister(const PowerControllerConfig_t *config);
 
 /**
  * @brief 功率控制器任务（独立任务）
@@ -169,15 +170,14 @@ void PowerGetLimitedOutput(PowerControllerInstance *instance,
                            PowerMotorObj_t motor_objs[4], float output[4]);
 
 /**
- * @brief 更新裁判系统数据
+ * @brief 更新裁判系统功率反馈
  * @param instance 功率控制器实例
- * @param chassis_power_limit 底盘功率上限
- * @param chassis_power_buffer 功率缓冲
- * @param chassis_power 当前功率
+ * @param limit_w 当前生效的功率上限 (W)
+ * @param buffer_energy 裁判系统缓冲能量
+ * @param power_w 裁判系统反馈功率 (W)
  */
-void PowerUpdateRefereeData(PowerControllerInstance *instance,
-                            float chassis_power_limit,
-                            float chassis_power_buffer, float chassis_power);
+void PowerUpdateRefereeData(PowerControllerInstance *instance, float limit_w,
+                            float buffer_energy, float power_w);
 
 /**
  * @brief 更新超级电容数据
@@ -202,7 +202,8 @@ void PowerUpdateMotorFeedback(PowerControllerInstance *instance,
  * @param instance 功率控制器实例
  * @return 功率控制器状态结构体指针
  */
-const PowerControllerStatus_t *PowerGetStatus(PowerControllerInstance *instance);
+const PowerControllerStatus_t *
+PowerGetStatus(PowerControllerInstance *instance);
 
 /**
  * @brief 设置RLS使能状态
@@ -212,11 +213,11 @@ const PowerControllerStatus_t *PowerGetStatus(PowerControllerInstance *instance)
 void PowerSetRLSEnable(PowerControllerInstance *instance, uint8_t enable);
 
 /**
- * @brief 设置用户自定义功率限制
+ * @brief 设置当前生效的目标功率上限
  * @param instance 功率控制器实例
- * @param power_limit 功率限制值 (W)
+ * @param limit_w 目标功率上限 (W)
  */
-void PowerSetUserLimit(PowerControllerInstance *instance, float power_limit);
+void PowerSetUserLimit(PowerControllerInstance *instance, float limit_w);
 
 /**
  * @brief 更新裁判系统在线状态

@@ -1,5 +1,6 @@
 #include "HC05.h"
 #include "bsp_usart.h"
+#include "string.h"
 
 #define HC05_BUFFERSIZE  HC05_DATASIZE+2  // HC05发送和接收数据buffer大小，不得大于256
 
@@ -12,8 +13,9 @@ static USARTInstance *hc05_usart_instance;    // HC05串口通信实例
 static uint8_t hc05_init_flag = 0;  // HC05初始化标志位
 
 // *hc05_usart_instance串口回调函数
-static void HC05RxCallback()
+static void HC05RxCallback(uint16_t size)
 {
+    (void)size;
     uint8_t *rxbuff;
     rxbuff = hc05_usart_instance->recv_buff;
 
@@ -31,6 +33,7 @@ static void HC05RxCallback()
 HC05 *HC05Init(UART_HandleTypeDef *hc05_usart_handle)
 {
     USART_Init_Config_s conf;
+    memset(&conf, 0, sizeof(conf));
     conf.module_callback = HC05RxCallback;
     conf.usart_handle = hc05_usart_handle;
     conf.recv_buff_size = HC05_BUFFERSIZE;

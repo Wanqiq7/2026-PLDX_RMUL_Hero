@@ -13,9 +13,9 @@
 #ifndef _CONTROLLER_H
 #define _CONTROLLER_H
 
-#include "arm_math.h"
-#include "bsp_dwt.h"
 #include "main.h"
+#include "arm_math_compat.h"
+#include "bsp_dwt.h"
 #include "memory.h"
 #include "stdint.h"
 #include "stdlib.h"

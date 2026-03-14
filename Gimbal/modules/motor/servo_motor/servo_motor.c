@@ -9,13 +9,14 @@ uint8_t servo_unload[6]={0x55,0x55,0x04,0x14,0x01,0x01};
 /*第二版*/
 static ServoInstance *servo_motor_instance[SERVO_MOTOR_CNT];
 static uint8_t servo_idx = 0; // register servo_idx,是该文件的全局舵机索引,在注册时使用
-static void DecodeServo();
+static void DecodeServo(uint16_t size);
 // 通过此函数注册一个舵机
 ServoInstance *ServoInit(Servo_Init_Config_s *Servo_Init_Config)
 {
     ServoInstance *servo = (ServoInstance *)malloc(sizeof(ServoInstance));
     memset(servo, 0, sizeof(ServoInstance));
     USART_Init_Config_s config;
+    memset(&config, 0, sizeof(config));
     servo->servo_type = Servo_Init_Config->servo_type;
     switch (Servo_Init_Config->servo_type)
     {
@@ -60,8 +61,9 @@ void ServoSetAngle(ServoInstance *servo, float angle)
 }
 
 //@todo 只读取了角度 还有电压，动作是否完成等 且只支持一个串口
-static void DecodeServo()
+static void DecodeServo(uint16_t size)
 {
+    (void)size;
     for (uint8_t i = 0; i < servo_idx; i++)
     {
         if (servo_motor_instance[i]->servo_type == Bus_Servo)

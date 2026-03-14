@@ -23,7 +23,7 @@
 */
 
 #include "stm32f407xx.h"
-#include "arm_math.h"
+#include "arm_math_compat.h"
 //#include "dsp/matrix_functions.h"
 #include "math.h"
 #include "stdint.h"

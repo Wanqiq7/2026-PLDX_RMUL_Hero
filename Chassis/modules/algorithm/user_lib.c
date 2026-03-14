@@ -13,11 +13,11 @@
 #ifndef _USER_LIB_H
 #define _USER_LIB_H
 
-#include "arm_math.h"
-#include "cmsis_os.h"
 #include "main.h"
-#include "stdint.h"
 #include "stm32f407xx.h"
+#include "arm_math_compat.h"
+#include "cmsis_os.h"
+#include "stdint.h"
 
 #ifndef user_malloc
 #ifdef _CMSIS_OS_H
@@ -243,47 +243,6 @@ float LowPassFilter_Float(float new_value, float K, float *last_value) {
   float out = K * new_value + (1.0f - K) * (*last_value);
   *last_value = out;
   return out;
-}
-
-/**
- * @brief  斜坡轨迹规划器核心函数 (单位: CAN指令值),用于键盘控制
- * @param  target      目标指令值
- * @param  current     当前规划器的输出指令值 (上一周期的结果)
- * @param  accel       加速度 (指令值/秒)
- * @param  decel       减速度 (指令值/秒)
- * @param  brake_decel 反向制动减速度 (指令值/秒)
- * @param  dt          控制周期 (s)
- * @retval             当前周期规划好的输出指令值
- */
-static float SoftRamp_CMD(float target, float current, float accel, float decel,
-                          float brake_decel, float dt) {
-  float ramp_out = current;
-  float error = target - current;
-
-  // 判断是加速、减速还是反向制动
-  if (target * current >= 0) // 目标值和当前值同号
-  {
-    if (fabsf(target) > fabsf(current)) // 加速
-    {
-      ramp_out += accel * dt * sign(error);
-    } else // 减速
-    {
-      ramp_out += decel * dt * sign(error);
-    }
-  } else // 目标值和当前值异号 (反向制动)
-  {
-    ramp_out += brake_decel * dt * sign(error);
-  }
-
-  // 限制规划值不能超过目标值
-  if (sign(error) > 0) {
-    ramp_out = float_constrain(ramp_out, current, target);
-  } else {
-    ramp_out = float_constrain(ramp_out, target, current);
-  }
-
-  // 最终再对输出进行一次总范围的限制
-  return float_constrain(ramp_out, -16384.0f, 16384.0f);
 }
 
 float Sqrt(float x) {

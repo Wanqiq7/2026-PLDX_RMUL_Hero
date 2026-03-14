@@ -160,15 +160,12 @@ void DMMotorTask(void const *argument)
 }
 void DMMotorControlInit()
 {
-    char dm_task_name[5] = "dm";
     // 遍历所有电机实例,创建任务
     if (!idx)
         return;
     for (size_t i = 0; i < idx; i++)
     {
-        char dm_id_buff[2] = {0};
-        __itoa(i, dm_id_buff, 10);
-        strcat(dm_task_name, dm_id_buff);
+        /* CMSIS-RTOS v1 线程定义名是编译期标识符，运行期拼接无效且有越界风险 */
         osThreadDef(dm_task_name, DMMotorTask, osPriorityNormal, 0, 128);
         dm_task_handle[i] = osThreadCreate(osThread(dm_task_name), dm_motor_instance[i]);
     }

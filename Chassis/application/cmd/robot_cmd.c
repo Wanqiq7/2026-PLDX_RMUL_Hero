@@ -29,8 +29,14 @@
       (angle) = PITCH_MIN_ANGLE;                                               \
   } while (0)
 
-static const float RC_CMD_MAX_LINEAR_SPEED = 2.0f;  // m/s
-static const float RC_CMD_MAX_ANGULAR_SPEED = 2.5f; // rad/s
+// 仅用于测试：允许通过显式操控进入云台系统辨识模式
+#ifndef CMD_ENABLE_GIMBAL_SYSID
+#define CMD_ENABLE_GIMBAL_SYSID 0
+#endif
+// 键鼠功率档位（通过 chassis_speed_buff 透传给底盘功率控制）
+static const int CHASSIS_POWER_ECO_PERCENT = 80;       // 经济档：80%功率
+static const int CHASSIS_POWER_LIMIT_PERCENT = 100;    // 额定档：100%功率
+static const int CHASSIS_POWER_OVERDRIVE_PERCENT = 120; // 超功率档：120%功率
 
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
@@ -133,10 +139,25 @@ void RobotCMDInit() {
           },
       .recv_data_len = sizeof(Chassis_Upload_Data_s),
       .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+      .daemon_count = 30,
   };
   cmd_can_comm = CANCommInit(&comm_conf);
 #endif // GIMBAL_BOARD
   gimbal_cmd_send.pitch = 0;
+  // 默认功率档：额定档（100%）
+  chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
+  chassis_cmd_send.vision_is_tracking = 0;
+  chassis_cmd_send.image_online = 0;
+  chassis_cmd_send.image_target_locked = 0;
+  chassis_cmd_send.image_auto_fire_request = 0;
+  chassis_cmd_send.image_should_fire = 0;
+  chassis_cmd_send.image_cmd_seq = 0;
+  chassis_cmd_send.image_ts_ms = 0;
+  chassis_cmd_send.ui_friction_on = 0;
+  chassis_cmd_send.ui_autoaim_enabled = 0;
+  chassis_fetch_data.referee_online = 0;
+  chassis_fetch_data.current_hp = 0;
+  chassis_fetch_data.buffer_energy = 0;
 
   robot_state =
       ROBOT_READY; // 启动时机器人进入工作模式,后续加入所有应用初始化完成之后再进入
@@ -231,11 +252,19 @@ static void CalcOffsetAngle() {
  *
  */
 static void RemoteControlSet() {
+  // 遥控器模式固定为额定功率档，避免与键鼠档位残留互相干扰
+  chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
   // 左侧开关状态为[中],底盘跟随云台
   if (switch_is_mid(rc_data[TEMP].rc.switch_left)) {
     chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
-    // gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
-    gimbal_cmd_send.gimbal_mode = GIMBAL_SYS_ID_CHIRP;
+#if CMD_ENABLE_GIMBAL_SYSID
+    // 仅测试态允许进入辨识：左中位 + 右上位
+    gimbal_cmd_send.gimbal_mode = switch_is_up(rc_data[TEMP].rc.switch_right)
+                                      ? GIMBAL_SYS_ID_CHIRP
+                                      : GIMBAL_GYRO_MODE;
+#else
+    gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+#endif
   }
   // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
   else if (switch_is_down(
@@ -311,12 +340,20 @@ static void RemoteControlSet() {
  */
 static void MouseKeySet() {
   float target_vx, target_vy;
-  float dt = 0.005f; // 5ms
+  static uint32_t mouse_key_last_tick = 0;
+  float dt = DWT_GetDeltaT(&mouse_key_last_tick);
+  // 异常保护：首次调用或调度异常时回落到1ms
+  if (dt <= 0.0f || dt > 0.05f) {
+    dt = 0.001f;
+  }
+
+  // 键鼠模式默认底盘跟随云台
+  chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
   // 系数待测
   target_vx =
       rc_data[TEMP].key[KEY_PRESS].w * CHASSIS_KB_MAX_SPEED_X -
       rc_data[TEMP].key[KEY_PRESS].s * CHASSIS_KB_MAX_SPEED_X; // 系数待测
-  target_vy = rc_data[TEMP].key[KEY_PRESS].s * CHASSIS_KB_MAX_SPEED_Y -
+  target_vy = rc_data[TEMP].key[KEY_PRESS].a * CHASSIS_KB_MAX_SPEED_Y -
               rc_data[TEMP].key[KEY_PRESS].d * CHASSIS_KB_MAX_SPEED_Y;
   keyboard_vx_cmd_planned =
       SoftRamp(target_vx, keyboard_vx_cmd_planned, 0, KEYBOARD_RAMP_ACCEL,
@@ -343,7 +380,7 @@ static void MouseKeySet() {
     shoot_cmd_send.bullet_speed = 30;
     break;
   }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_E] % 4) // E键设置发射模式
+  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_G] % 4) // G键设置发射模式
   {
   case 0:
     shoot_cmd_send.load_mode = LOAD_STOP;
@@ -358,16 +395,7 @@ static void MouseKeySet() {
     shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
     break;
   }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_R] % 2) // R键开关弹舱
-  {
-  case 0:
-    shoot_cmd_send.lid_mode = LID_OPEN;
-    break;
-  default:
-    shoot_cmd_send.lid_mode = LID_CLOSE;
-    break;
-  }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_F] % 2) // F键开关摩擦轮
+  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_E] % 2) // E键开关摩擦轮
   {
   case 0:
     shoot_cmd_send.friction_mode = FRICTION_OFF;
@@ -376,19 +404,16 @@ static void MouseKeySet() {
     shoot_cmd_send.friction_mode = FRICTION_ON;
     break;
   }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_C] % 4) // C键设置底盘速度
+  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_C] % 3) // C键循环切换功率档
   {
   case 0:
-    chassis_cmd_send.chassis_speed_buff = 40;
+    chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
     break;
   case 1:
-    chassis_cmd_send.chassis_speed_buff = 60;
-    break;
-  case 2:
-    chassis_cmd_send.chassis_speed_buff = 80;
+    chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_ECO_PERCENT;
     break;
   default:
-    chassis_cmd_send.chassis_speed_buff = 100;
+    chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_OVERDRIVE_PERCENT;
     break;
   }
   switch (rc_data[TEMP]
@@ -439,7 +464,7 @@ static void EmergencyHandler() {
   }
 }
 
-/* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
+/* 机器人核心控制任务,按RTOS调度频率运行 */
 void RobotCMDTask() {
   // BMI088Acquire(bmi088_test,&bmi088_data) ;
   // 从其他应用获取回传数据
@@ -456,8 +481,12 @@ void RobotCMDTask() {
   CalcOffsetAngle();
   // 计算就近回中误差(支持车头翻转优化)
   CalcNearCenterError(chassis_cmd_send.offset_angle);
-  // 遥控器控制
-  RemoteControlSet();
+  // 右拨杆上档切换为键鼠控制，其余档位为遥控器控制
+  if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
+    MouseKeySet();
+  } else {
+    RemoteControlSet();
+  }
   EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
 
   // 设置视觉发送数据,还需增加加速度和角速度数据

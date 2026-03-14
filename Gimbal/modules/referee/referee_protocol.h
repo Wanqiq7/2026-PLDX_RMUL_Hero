@@ -19,6 +19,12 @@
 #define Robot_Red 0
 #define Robot_Blue 1
 #define Communicate_Data_LEN 5 // 自定义交互数据长度，该长度决定了我方发送和他方接收，自定义交互数据协议更改时只需要更改此宏定义即可
+// 0x0301协议上行数据段约束：数据头6字节 + 内容数据段x（x<=112）
+#define STUDENT_INTERACTIVE_HEADER_LEN 6u
+#define STUDENT_INTERACTIVE_MAX_DATA_LEN 112u
+#define STUDENT_INTERACTIVE_MAX_FRAME_DATA_LEN (STUDENT_INTERACTIVE_HEADER_LEN + STUDENT_INTERACTIVE_MAX_DATA_LEN)
+// 图传链路可变长命令本地缓存上限（需覆盖0x0310=300B数据段）
+#define IMAGE_INTERACTIVE_MAX_DATA_LEN 300u
 
 #pragma pack(1)
 
@@ -75,6 +81,8 @@ typedef enum
 	ID_event_data = 0x0101,				   // 场地事件数据
 	ID_supply_projectile_action = 0x0102,  // 场地补给站动作标识数据
 	ID_supply_projectile_booking = 0x0103, // 场地补给站预约子弹数据
+	ID_referee_warning = 0x0104,		   // 裁判警告数据
+	ID_dart_info = 0x0105,				   // 飞镖相关状态数据
 	ID_game_robot_state = 0x0201,		   // 机器人状态数据
 	ID_power_heat_data = 0x0202,		   // 实时功率热量数据
 	ID_game_robot_pos = 0x0203,			   // 机器人位置数据
@@ -82,7 +90,27 @@ typedef enum
 	ID_aerial_robot_energy = 0x0205,	   // 空中机器人能量状态数据
 	ID_robot_hurt = 0x0206,				   // 伤害状态数据
 	ID_shoot_data = 0x0207,				   // 实时射击数据
+	ID_projectile_allowance = 0x0208,	   // 弹丸剩余量数据
+	ID_rfid_status = 0x0209,			   // RFID状态数据
+	ID_dart_client_cmd = 0x020A,		   // 飞镖客户端指令
+	ID_ground_robot_position = 0x020B,	   // 地面机器人位置
+	ID_radar_mark_data = 0x020C,		   // 雷达标记数据
+	ID_sentry_info = 0x020D,			   // 哨兵信息数据
+	ID_radar_info = 0x020E,			   // 雷达信息数据
 	ID_student_interactive = 0x0301,	   // 机器人间交互数据
+	ID_map_command = 0x0303,		   // 选手端小地图交互数据（常规链路）
+	ID_map_robot_data = 0x0305,	   // 小地图接收雷达数据（常规链路）
+	ID_map_path_data = 0x0307,		   // 小地图接收路径数据（常规链路）
+	ID_map_robot_custom_data = 0x0308, // 小地图接收机器人数据（常规链路）
+	ID_map_interactive_data = 0x0309,	   // 图传链路：自定义控制器接收机器人数据
+	ID_custom_info_030A = 0x030A,		   // 扩展交互数据A
+	ID_custom_info_030B = 0x030B,		   // 扩展交互数据B
+	ID_custom_info_030C = 0x030C,		   // 扩展交互数据C
+	ID_custom_info_030D = 0x030D,		   // 扩展交互数据D
+	ID_custom_info_030E = 0x030E,		   // 扩展交互数据E
+	ID_custom_info_030F = 0x030F,		   // 扩展交互数据F
+	ID_custom_info_0310 = 0x0310,		   // 图传链路：机器人发送给自定义客户端（大包）
+	ID_custom_info_0311 = 0x0311,		   // 图传链路：自定义客户端发送给机器人
 } CmdID_e;
 
 /* 命令码数据段长,根据官方协议来定义长度，还有自定义数据长度 */
@@ -90,17 +118,21 @@ typedef enum
 {
 	LEN_game_state = 11,						 // 0x0001
 	LEN_game_result = 1,						 // 0x0002
-	LEN_game_robot_HP = 32,						 // 0x0003
+	LEN_game_robot_HP = 16,						 // 0x0003
 	LEN_event_data = 4,							 // 0x0101
 	LEN_supply_projectile_action = 4,			 // 0x0102
 	LEN_game_robot_state = 13,					 // 0x0201
-	LEN_power_heat_data = 16,					 // 0x0202
-	LEN_game_robot_pos = 16,					 // 0x0203
-	LEN_buff_musk = 6,							 // 0x0204
+	LEN_power_heat_data = 14,					 // 0x0202
+	LEN_game_robot_pos = 12,					 // 0x0203
+	LEN_buff_musk = 8,							 // 0x0204
 	LEN_aerial_robot_energy = 2,				 // 0x0205
 	LEN_robot_hurt = 1,							 // 0x0206
 	LEN_shoot_data = 7,							 // 0x0207
 	LEN_receive_data = 6 + Communicate_Data_LEN, // 0x0301
+	LEN_map_command = 12,					 // 0x0303
+	LEN_map_robot_data = 24,				 // 0x0305
+	LEN_map_path_data = 105,				 // 0x0307
+	LEN_map_robot_custom_data = 34,			 // 0x0308
 
 } JudgeDataLength_e;
 
@@ -122,25 +154,17 @@ typedef struct
 	uint8_t winner;
 } ext_game_result_t;
 
-/* ID: 0x0003  Byte:  32    比赛机器人血量数据 */
+/* ID: 0x0003  Byte:  16    比赛机器人血量数据（己方视角） */
 typedef struct
 {
-	uint16_t red_1_robot_HP;
-	uint16_t red_2_robot_HP;
-	uint16_t red_3_robot_HP;
-	uint16_t red_4_robot_HP;
-	uint16_t red_5_robot_HP;
-	uint16_t red_7_robot_HP;
-	uint16_t red_outpost_HP;
-	uint16_t red_base_HP;
-	uint16_t blue_1_robot_HP;
-	uint16_t blue_2_robot_HP;
-	uint16_t blue_3_robot_HP;
-	uint16_t blue_4_robot_HP;
-	uint16_t blue_5_robot_HP;
-	uint16_t blue_7_robot_HP;
-	uint16_t blue_outpost_HP;
-	uint16_t blue_base_HP;
+	uint16_t hero_robot_HP;
+	uint16_t engineer_robot_HP;
+	uint16_t infantry_3_robot_HP;
+	uint16_t infantry_4_robot_HP;
+	uint16_t reserved;
+	uint16_t sentry_robot_HP;
+	uint16_t outpost_HP;
+	uint16_t base_HP;
 } ext_game_robot_HP_t;
 
 /* ID: 0x0101  Byte:  4    场地事件数据 */
@@ -167,41 +191,40 @@ typedef struct
 	uint16_t maximum_HP; 
 	uint16_t shooter_barrel_cooling_value; 
 	uint16_t shooter_barrel_heat_limit; 
-	uint16_t chassis_power_limit; 
+	uint16_t chassis_power_limit;
 	uint8_t power_management_gimbal_output : 1; 
 	uint8_t power_management_chassis_output : 1; 
 	uint8_t power_management_shooter_output : 1; 
 } ext_game_robot_state_t;
 
-/* ID: 0X0202  Byte: 16    实时功率热量数据 */
+/* ID: 0X0202  Byte: 14    实时功率热量数据 */
 typedef struct
 {
 	uint16_t chassis_voltage; 
 	uint16_t chassis_current; 
 	float chassis_power; 
 	uint16_t buffer_energy; 
-	uint16_t shooter_17mm_1_barrel_heat; 
-	uint16_t shooter_17mm_2_barrel_heat; 
+	uint16_t shooter_17mm_barrel_heat; 
 	uint16_t shooter_42mm_barrel_heat; 
 } ext_power_heat_data_t;
 
-/* ID: 0x0203  Byte: 16    机器人位置数据 */
+/* ID: 0x0203  Byte: 12    机器人位置数据 */
 typedef struct
 {
 	float x;
 	float y;
-	float z;
-	float yaw;
+	float angle;
 } ext_game_robot_pos_t;
 
-/* ID: 0x0204  Byte:  6    机器人增益数据 */
+/* ID: 0x0204  Byte:  8    机器人增益数据 */
 typedef struct
 {
 	uint8_t recovery_buff; 
-	uint8_t cooling_buff; 
+	uint16_t cooling_buff; 
 	uint8_t defence_buff; 
 	uint8_t vulnerability_buff; 
 	uint16_t attack_buff; 
+	uint8_t remaining_energy;
 } ext_buff_musk_t;
 
 /* ID: 0x0205  Byte:  2    空中机器人能量状态数据 */
@@ -227,13 +250,99 @@ typedef struct
 	float bullet_speed;
 } ext_shoot_data_t;
 
+/* ID: 0x0303  Byte: 12    选手端小地图交互数据（常规链路） */
+typedef struct
+{
+	float target_position_x;
+	float target_position_y;
+	uint8_t cmd_keyboard;
+	uint8_t target_robot_id;
+	uint16_t cmd_source;
+} ext_map_command_t;
+
+/* ID: 0x0305  Byte: 24    小地图接收雷达数据（常规链路） */
+typedef struct
+{
+	uint16_t hero_position_x;
+	uint16_t hero_position_y;
+	uint16_t engineer_position_x;
+	uint16_t engineer_position_y;
+	uint16_t infantry_3_position_x;
+	uint16_t infantry_3_position_y;
+	uint16_t infantry_4_position_x;
+	uint16_t infantry_4_position_y;
+	uint16_t reserved_0;
+	uint16_t reserved_1;
+	uint16_t sentry_position_x;
+	uint16_t sentry_position_y;
+} ext_map_robot_data_t;
+
+/* ID: 0x0307  Byte: 105   小地图接收路径数据（常规链路） */
+typedef struct
+{
+	uint8_t intention;
+	uint16_t start_position_x;
+	uint16_t start_position_y;
+	int8_t delta_x[49];
+	int8_t delta_y[49];
+	uint16_t sender_id;
+} ext_map_path_data_t;
+
+/* ID: 0x0308  Byte: 34    小地图接收机器人数据（常规链路，最小解析容器） */
+typedef struct
+{
+	uint8_t raw_data[LEN_map_robot_custom_data];
+} ext_map_robot_custom_data_t;
+
+/* ID: 0x0309/0x0310/0x0311 可变长图传链路数据本地缓存 */
+typedef struct
+{
+	uint16_t data_len;
+	uint8_t data[IMAGE_INTERACTIVE_MAX_DATA_LEN];
+} ext_map_interactive_data_var_t;
+
+typedef struct
+{
+	uint16_t data_len;
+	uint8_t data[IMAGE_INTERACTIVE_MAX_DATA_LEN];
+} ext_custom_info_0310_var_t;
+
+typedef struct
+{
+	uint16_t data_len;
+	uint8_t data[IMAGE_INTERACTIVE_MAX_DATA_LEN];
+} ext_custom_info_0311_var_t;
+
+/* 关键命令长度一致性校验，防止协议升级时结构体漂移 */
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+_Static_assert(IMAGE_INTERACTIVE_MAX_DATA_LEN >= 300u, "IMAGE_INTERACTIVE_MAX_DATA_LEN too small for 0x0310");
+_Static_assert(sizeof(ext_game_robot_HP_t) == LEN_game_robot_HP, "LEN_game_robot_HP mismatch");
+_Static_assert(sizeof(ext_power_heat_data_t) == LEN_power_heat_data, "LEN_power_heat_data mismatch");
+_Static_assert(sizeof(ext_game_robot_pos_t) == LEN_game_robot_pos, "LEN_game_robot_pos mismatch");
+_Static_assert(sizeof(ext_buff_musk_t) == LEN_buff_musk, "LEN_buff_musk mismatch");
+_Static_assert(sizeof(ext_map_command_t) == LEN_map_command, "LEN_map_command mismatch");
+_Static_assert(sizeof(ext_map_robot_data_t) == LEN_map_robot_data, "LEN_map_robot_data mismatch");
+_Static_assert(sizeof(ext_map_path_data_t) == LEN_map_path_data, "LEN_map_path_data mismatch");
+_Static_assert(sizeof(ext_map_robot_custom_data_t) == LEN_map_robot_custom_data, "LEN_map_robot_custom_data mismatch");
+#else
+typedef char image_interactive_data_len_check[(IMAGE_INTERACTIVE_MAX_DATA_LEN >= 300u) ? 1 : -1];
+typedef char ext_game_robot_HP_len_check[(sizeof(ext_game_robot_HP_t) == LEN_game_robot_HP) ? 1 : -1];
+typedef char ext_power_heat_data_len_check[(sizeof(ext_power_heat_data_t) == LEN_power_heat_data) ? 1 : -1];
+typedef char ext_game_robot_pos_len_check[(sizeof(ext_game_robot_pos_t) == LEN_game_robot_pos) ? 1 : -1];
+typedef char ext_buff_musk_len_check[(sizeof(ext_buff_musk_t) == LEN_buff_musk) ? 1 : -1];
+typedef char ext_map_command_len_check[(sizeof(ext_map_command_t) == LEN_map_command) ? 1 : -1];
+typedef char ext_map_robot_data_len_check[(sizeof(ext_map_robot_data_t) == LEN_map_robot_data) ? 1 : -1];
+typedef char ext_map_path_data_len_check[(sizeof(ext_map_path_data_t) == LEN_map_path_data) ? 1 : -1];
+typedef char ext_map_robot_custom_data_len_check[(sizeof(ext_map_robot_custom_data_t) == LEN_map_robot_custom_data) ? 1 : -1];
+#endif
+
 /****************************机器人交互数据****************************/
 /****************************机器人交互数据****************************/
 /* 发送的内容数据段最大为 113 检测是否超出大小限制?实际上图形段不会超，数据段最多30个，也不会超*/
 /* 交互数据头结构 */
 typedef struct
 {
-	uint16_t data_cmd_id; // 由于存在多个内容 ID，但整个cmd_id 上行频率最大为 10Hz，请合理安排带宽。注意交互部分的上行频率
+	uint16_t data_cmd_id; // 由于存在多个内容 ID，但整个cmd_id 上行频率最大为 30Hz，请合理安排带宽。注意交互部分的上行频率
 	uint16_t sender_ID;
 	uint16_t receiver_ID;
 } ext_student_interactive_header_data_t;
@@ -292,13 +401,21 @@ typedef enum
 /*
 	学生机器人间通信 cmd_id 0x0301，内容 ID:0x0200~0x02FF
 	自定义交互数据 机器人间通信：0x0301。
-	发送频率：上限 10Hz
+	发送频率：上限 30Hz
 */
 // 自定义交互数据协议，可更改，更改后需要修改最上方宏定义数据长度的值
 typedef struct
 {
 	uint8_t data[Communicate_Data_LEN]; // 数据段,n需要小于113
 } robot_interactive_data_t;
+
+// 0x0301动态接收容器：data_len不在原始协议中，仅用于本地标记实际内容长度
+typedef struct
+{
+	ext_student_interactive_header_data_t datahead;
+	uint16_t data_len;
+	uint8_t data[STUDENT_INTERACTIVE_MAX_DATA_LEN];
+} robot_interactive_data_var_t;
 
 // 机器人交互信息_发送
 typedef struct

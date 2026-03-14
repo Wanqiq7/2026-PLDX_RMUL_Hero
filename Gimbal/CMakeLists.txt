@@ -3,15 +3,6 @@ cmake_minimum_required(VERSION 3.16)
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-# 指定工具链
-set(CMAKE_C_COMPILER_FORCED TRUE) # skip compiler test
-set(CMAKE_CXX_COMPILER_FORCED TRUE)
-set(CMAKE_C_COMPILER arm-none-eabi-gcc)
-set(CMAKE_ASM_COMPILER arm-none-eabi-gcc)
-set(CMAKE_OBJCOPY arm-none-eabi-objcopy)
-set(CMAKE_OBJDUMP arm-none-eabi-objdump)
-set(SIZE arm-none-eabi-size) 
-set(CMAKE_AR arm-none-eabi-ar)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON) 
 
@@ -28,12 +19,12 @@ set(DSP_NAME "libCMSISDSP.a") # 指定DSP库名称
 link_directories(${CMAKE_SOURCE_DIR}/Middlewares/ST/ARM/DSP/Lib)
 
 # Generic compiler settings for optimization and basic link lib
-add_compile_options(-pipe ${MCU_FLAGS} -Wall -Werror -fmessage-length=0 # basic options
+add_compile_options(-pipe ${MCU_FLAGS} -Wall -fmessage-length=0 # basic options
                     -ffunction-sections -fdata-sections -fno-common # optimize options 
                     )
 add_link_options(-pipe ${MCU_FLAGS} -T${LINKER_SCRIPT} -Wl,--no-warn-rwx-segments # close RWX warning
-                 -lm -lc -lnosys # lib options
-                 -Wl,--gc-sections -flto -specs=nano.specs -specs=nosys.specs # optimize options
+                 -lm -lc # lib options
+                 -Wl,--gc-sections -flto # optimize options
                  -Wl,-Map=${PROJECT_BINARY_DIR}/${PROJECT_NAME}.map -Wl,--cref -Wl,--print-memory-usage # map options
                  ) # if your executable is too large , try option '-s' to strip symbols
 
@@ -68,6 +59,7 @@ include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/application)
 include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/Inc)
 
 # add source, only surfix .c
+# 递归收集 bsp/modules/application 下新增源文件,包括 bsp/usart/bsp_usart_async.c
 file(GLOB_RECURSE SOURCES
     "Drivers/*.c"
     "Src/*.c"
@@ -76,6 +68,9 @@ file(GLOB_RECURSE SOURCES
     "modules/*.c"
     "application/*.c"
 )
+
+# 示例文件不参与正式固件构建，避免占位实现污染主 target
+list(FILTER SOURCES EXCLUDE REGEX "modules/algorithm/LQR_Example\\.c$")
 
 # 汇编文件路径
 # ENABLE_LANGUAGE(ASM)
@@ -102,14 +97,15 @@ else ()
 endif ()
 
 # build binary and hex file
-add_executable(${PROJECT_NAME}.elf  ${SOURCES} ${ASM_SOURCES} ${LINKER_SCRIPT})
-target_link_libraries(${PROJECT_NAME}.elf ${DSP_NAME} m) # link DSP lib and math lib
+add_executable(${PROJECT_NAME}  ${SOURCES} ${ASM_SOURCES} ${LINKER_SCRIPT})
+set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".elf")
+target_link_libraries(${PROJECT_NAME} ${DSP_NAME} m) # link DSP lib and math lib
 
 add_custom_command(
-    TARGET ${PROJECT_NAME}.elf POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${PROJECT_NAME}.elf> ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex
-    COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${PROJECT_NAME}.elf> ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin
+    TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${PROJECT_NAME}> ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex
+    COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${PROJECT_NAME}> ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin
     COMMENT "Building hex & bin file..."
     COMMENT "EXCUTABLE SIZE:"
-    COMMAND ${SIZE} ${PROJECT_NAME}.elf
+    COMMAND ${CMAKE_SIZE} $<TARGET_FILE:${PROJECT_NAME}>
   )

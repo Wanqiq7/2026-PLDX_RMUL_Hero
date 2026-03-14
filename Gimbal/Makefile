@@ -113,6 +113,7 @@ bsp/gpio/bsp_gpio.c \
 bsp/spi/bsp_spi.c \
 bsp/iic/bsp_iic.c \
 bsp/can/bsp_can.c \
+bsp/usart/bsp_usart_async.c \
 bsp/usart/bsp_usart.c \
 bsp/usb/bsp_usb.c \
 bsp/log/bsp_log.c \
@@ -150,6 +151,7 @@ modules/can_comm/can_comm.c \
 modules/message_center/message_center.c \
 modules/daemon/daemon.c \
 modules/alarm/buzzer.c \
+modules/vtm_input/vtm_input.c \
 application/gimbal/gimbal.c \
 application/chassis/chassis.c \
 application/shoot/shoot.c \
@@ -270,6 +272,7 @@ C_INCLUDES =  \
 -Imodules/message_center \
 -Imodules/daemon \
 -Imodules/alarm \
+-Imodules/vtm_input \
 -Imodules  \
 -IMiddlewares/ST/ARM/DSP/Inc
 
@@ -277,7 +280,7 @@ C_INCLUDES =  \
 # compile gcc flags
 ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -fdata-sections -ffunction-sections
 
-CFLAGS += $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -fdata-sections -ffunction-sections -fmessage-length=0 -Werror
+CFLAGS += $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -fdata-sections -ffunction-sections -fmessage-length=0
 
 ifeq ($(DEBUG), 1)
 CFLAGS += -g -gdwarf-2

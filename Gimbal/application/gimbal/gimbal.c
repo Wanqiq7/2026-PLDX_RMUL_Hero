@@ -1,5 +1,5 @@
 #include "gimbal.h"
-#include "arm_math.h"
+#include "arm_math_compat.h"
 #include "bmi088.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -8,6 +8,7 @@
 #include "dmmotor.h"
 #include "general_def.h"
 #include "ins_task.h"
+#include "main.h"
 #include "message_center.h"
 #include "robot_def.h"
 #include "sysid_task.h"
@@ -90,12 +91,6 @@ static DJIMotorInstance *yaw_motor;
 static DMMotorInstance *pitch_motor;
 
 static float gimbal_yaw_cur_ff = 0.0f;
-static float damiao_pitch_gravity_ff = 0.0f;
-static float pitch_gravity_k =
-    PITCH_GRAVITY_K * GYRO2GIMBAL_DIR_PITCH; // m*g*r，符号随IMU方向
-static float pitch_gamma_rad =
-    PITCH_GRAVITY_GAMMA_DEG * (float)M_PI / 180.0f; // 重心偏置角(弧度)
-static float pitch_torque_ff = 0.0f;
 
 /* ==================== Ozone 联调变量（Pitch/MIT） ====================
  * 说明：MIT 模式下需要下发 kp/kd（刚度/阻尼）。为便于 Ozone
@@ -104,8 +99,8 @@ static float pitch_torque_ff = 0.0f;
  * 调参第一步：先将力矩前馈 t_ff 置 0，只调
  * kp/kd，确保系统稳定且无啸叫，再考虑加入前馈。
  * ================================================================ */
-volatile float gimbal_pitch_mit_kp = 5.45f;
-volatile float gimbal_pitch_mit_kd = 2.25f;
+volatile float gimbal_pitch_mit_kp = 18.8f;
+volatile float gimbal_pitch_mit_kd = 1.48f;
 /* MIT 期望角速度 v_des（单位：rad/s），默认置 0；可在 Ozone 实时修改 */
 volatile float gimbal_pitch_mit_v_des = 0.0f;
 /* MIT 期望力矩 τ_des（单位与达妙协议一致），默认置 0；可在 Ozone 实时修改 */
@@ -135,14 +130,6 @@ static float DJIMotorApplyInternalSign(const DJIMotorInstance *motor,
   return desired_set * sign;
 }
 
-static float GimbalPitchGravityFF(float pitch_rad) {
-  /* IMU 已输出弧度，这里直接用弧度做重力补偿 */
-  float theta = pitch_rad + pitch_gamma_rad;
-  pitch_torque_ff = pitch_gravity_k * cosf(theta); // theta 为弧度
-  damiao_pitch_gravity_ff = pitch_torque_ff;
-  return pitch_torque_ff;
-}
-
 void GimbalInit() {
   gimba_IMU_data = INS_Init();
 
@@ -160,24 +147,25 @@ void GimbalInit() {
               // rad/rad/s 进行调参。
               .angle_PID =
                   {
-                      .kp = 26.2f,
+                      .kp = 16.8f,
                       .ki = 0.0f,
-                      .kd = 2.15f,
-                      .MaxOut = 50.0f,    // 角速度参考限幅 [rad/s]
+                      .kd = 1.58f,
+                      .MaxOut = 100.0f,   // 角速度参考限幅 [rad/s]
                       .DeadBand = 0.001f, // 约 0.06°，抑制零点抖动
                       .Improve = PID_Derivative_On_Measurement |
                                  PID_DerivativeFilter, // 微分先行 + 微分滤波
-                      .Derivative_LPF_RC = 0.005f,
+                      .Derivative_LPF_RC =
+                          0.008f, // 微分滤波时间常数，单位秒（根据经验和实物调试确定，过大响应慢，过小噪声大）
                   },
               .speed_PID =
                   {
-                      .kp = 20000.0f,
+                      .kp = 22500.0f,
                       .ki = 2000.0f,
                       .kd = 0.0f,
                       .MaxOut = 16384.0f, // GM6020 电流指令（CAN 原始量）限幅
                       .DeadBand = 0.0f,
                       .Improve = PID_Integral_Limit,
-                      .IntegralLimit = 1800.0f,
+                      .IntegralLimit = 2000.0f,
                   },
               .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
@@ -246,7 +234,8 @@ void GimbalInit() {
   gimbal_sub = RegisterSubscriber("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
   // 注意：视觉订阅已移除，视觉控制量通过gimbal_cmd传递
   sysid_pub = RegisterPublisher("gimbal_sysid_cmd", sizeof(SysID_Ctrl_Cmd_s));
-  sysid_sub = RegisterSubscriber("gimbal_sysid_feedback", sizeof(SysID_Feedback_s));
+  sysid_sub =
+      RegisterSubscriber("gimbal_sysid_feedback", sizeof(SysID_Feedback_s));
 
   Gimbal_SysIDTaskInit(yaw_motor, pitch_motor, gimba_IMU_data);
 }
@@ -314,20 +303,10 @@ void GimbalTask() {
   case GIMBAL_ZERO_FORCE: {
     DJIMotorStop(yaw_motor);
     DMMotorStop(pitch_motor);
-    damiao_pitch_gravity_ff = 0.0;
     break;
   }
   case GIMBAL_GYRO_MODE: {
     DJIMotorEnable(yaw_motor);
-    DJIMotorSetRef(yaw_motor, yaw_ref_rad);
-    DMMotorEnable(pitch_motor);
-    DMMotorSetMITTargets(pitch_motor, pitch_ref_rad, mit_v_des, mit_torque,
-                         mit_kp, mit_kd);
-    break;
-  }
-  case GIMBAL_FREE_MODE: {
-    DJIMotorEnable(yaw_motor);
-    DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
     DJIMotorSetRef(yaw_motor, yaw_ref_rad);
     DMMotorEnable(pitch_motor);
     DMMotorSetMITTargets(pitch_motor, pitch_ref_rad, mit_v_des, mit_torque,

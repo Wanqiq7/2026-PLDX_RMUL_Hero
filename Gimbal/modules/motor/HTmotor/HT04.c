@@ -205,16 +205,11 @@ __attribute__((noreturn)) void HTMotorTask(void const *argument) {
 }
 
 void HTMotorControlInit() {
-  char ht_task_name[5] = "ht";
   // 遍历所有电机实例,创建任务
   if (!idx)
     return;
   for (size_t i = 0; i < idx; i++) {
-    char ht_id_buff[2] = {0};
-    __itoa(i, ht_id_buff, 10);
-    strcat(
-        ht_task_name,
-        ht_id_buff); // 似乎没什么吊用,osthreaddef会把第一个变量当作宏字符串传入,作为任务名
+    /* CMSIS-RTOS v1 线程定义名是编译期标识符，运行期拼接无效且有越界风险 */
     // @todo 还需要一个更优雅的方案来区分不同的电机任务
     osThreadDef(ht_task_name, HTMotorTask, osPriorityNormal, 0, 128);
     ht_task_handle[i] =

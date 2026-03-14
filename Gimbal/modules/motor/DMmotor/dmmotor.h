@@ -1,9 +1,11 @@
 #ifndef DMMOTOR_H
 #define DMMOTOR_H
+
 #include "bsp_can.h"
 #include "controller.h"
 #include "daemon.h"
 #include "motor_def.h"
+
 #include <stdint.h>
 
 #define DM_MOTOR_CNT 4
@@ -25,23 +27,23 @@ typedef enum {
 } DM_Mode_e;
 
 typedef struct {
-  uint8_t id;
-  uint8_t state;
-  float velocity;
-  float last_position;
-  float position;
-  float torque;
-  float T_Mos;
-  float T_Rotor;
-  int32_t total_round;
+  uint8_t motor_id;
+  uint8_t motor_state;
+  float output_velocity_rad_s;
+  float last_output_angle_rad;
+  float output_angle_rad;
+  float output_torque_nm;
+  float mos_temp_c;
+  float rotor_temp_c;
+  int32_t output_total_round;
 } DM_Motor_Measure_s;
 
 typedef struct {
-  uint16_t position_des;
-  uint16_t velocity_des;
-  uint16_t torque_des;
-  uint16_t Kp;
-  uint16_t Kd;
+  uint16_t angle_cmd_raw;
+  uint16_t velocity_cmd_raw;
+  uint16_t torque_cmd_raw;
+  uint16_t kp_cmd_raw;
+  uint16_t kd_cmd_raw;
 } DMMotor_Send_s;
 
 typedef struct {
@@ -50,51 +52,59 @@ typedef struct {
   PIDInstance current_PID;
   PIDInstance speed_PID;
   PIDInstance angle_PID;
-  DM_MIT_Limit_s limit; // 当前电机的 MIT 量程配置（未配置时退回默认）
-  DM_Mode_e mode;       // 当前电机的控制模式
-  DM_PVT_Config_s pvt_cfg;
-  float *other_angle_feedback_ptr;
-  float *other_speed_feedback_ptr;
-  float *speed_feedforward_ptr;
-  float *current_feedforward_ptr;
-  float pid_ref; // 保留兼容：raw MIT 模式使用
-  float angle_ref_deg;
-  float torque_ff_cmd;
-  float kd_cmd;
-  uint8_t use_pid_path; // 1: module 内部 PID 角度->速度->力矩
-  uint8_t use_raw_mit;  // 1: 使用 DMMotorSetMITTargets 下发的原始 MIT 目标
-  float mit_default_kp;
-  float mit_default_kd;
 
-  /* MIT目标（位置/速度/力矩/KP/KD） */
-  float mit_target_angle;
-  float mit_target_velocity;
-  float mit_target_torque;
-  float mit_target_kp;
-  float mit_target_kd;
+  /* MIT 协议量程与模式 */
+  DM_MIT_Limit_s mit_limit;
+  DM_Mode_e drive_mode;
+  DM_PVT_Config_s pvt_config;
 
-  /* 直接MIT速度/阻尼/力矩指令（位置/刚度锁零） */
-  float mit_direct_velocity;
-  float mit_direct_torque_ff;
-  float mit_direct_kd;
-  uint8_t mit_use_direct_velocity;
-  float pvt_pos;
-  float pvt_v_lim;
-  float pvt_i_lim;
-  uint8_t use_pvt;
+  /* 外部反馈与前馈接口 */
+  float *external_angle_feedback_ptr;
+  float *external_speed_feedback_ptr;
+  float *external_speed_feedforward_ptr;
+  float *external_torque_feedforward_ptr;
+
+  /* 模块内串级控制缓存 */
+  float mit_torque_fallback_nm;
+  float cascade_angle_ref_deg;
+  float cascade_torque_ff_nm;
+  float cascade_damping_kd;
+  uint8_t use_cascade_pid_path;
+  uint8_t use_mit_full_command;
+  float mit_default_stiffness_kp;
+  float mit_default_damping_kd;
+
+  /* MIT 五元组目标：角度/速度/力矩/刚度/阻尼 */
+  float mit_target_angle_rad;
+  float mit_target_velocity_rad_s;
+  float mit_target_torque_nm;
+  float mit_target_stiffness_kp;
+  float mit_target_damping_kd;
+
+  /* MIT 速度直控：位置锁零，仅保留速度/力矩前馈/阻尼 */
+  float mit_velocity_only_rad_s;
+  float mit_velocity_only_torque_ff_nm;
+  float mit_velocity_only_damping_kd;
+  uint8_t use_mit_velocity_only;
+
+  /* PVT 目标：位置/速度上限/电流比例 */
+  float pvt_target_angle_rad;
+  float pvt_velocity_limit_rad_s;
+  float pvt_current_limit_ratio;
+  uint8_t use_pvt_command_frame;
 
   Motor_Working_Type_e stop_flag;
-  CANInstance *motor_can_instace;
+  CANInstance *motor_can_instance;
   DaemonInstance *motor_daemon;
-  uint32_t tx_base_id;
-  uint32_t lost_cnt;
+  uint32_t command_tx_id;
+  uint32_t lost_count;
 } DMMotorInstance;
 
 typedef enum {
-  DM_CMD_MOTOR_MODE = 0xfc,    // 使能,会响应指令
-  DM_CMD_RESET_MODE = 0xfd,    // 停止
-  DM_CMD_ZERO_POSITION = 0xfe, // 将当前的位置设置为编码器零位
-  DM_CMD_CLEAR_ERROR = 0xfb    // 清除电机过热错误
+  DM_CMD_MOTOR_MODE = 0xfc,
+  DM_CMD_RESET_MODE = 0xfd,
+  DM_CMD_ZERO_POSITION = 0xfe,
+  DM_CMD_CLEAR_ERROR = 0xfb
 } DMMotor_Mode_e;
 
 DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config);
@@ -105,14 +115,12 @@ void DMMotorSetMITTargets(DMMotorInstance *motor, float angle, float omega,
 void DMMotorSetPVT(DMMotorInstance *motor, float pos_rad, float v_limit_rad_s,
                    float i_ratio);
 void DMMotorSetMode(DMMotorInstance *motor, DM_Mode_e mode);
-
 void DMMotorOuterLoop(DMMotorInstance *motor, Closeloop_Type_e closeloop_type);
-
 void DMMotorEnable(DMMotorInstance *motor);
-
 void DMMotorStop(DMMotorInstance *motor);
 void DMMotorCaliEncoder(DMMotorInstance *motor);
 void DMMotorControlInit();
 void DMMotorSetMITVelocity(DMMotorInstance *motor, float omega, float torque_ff,
                            float kd);
-#endif // !DMMOTOR
+
+#endif // DMMOTOR_H

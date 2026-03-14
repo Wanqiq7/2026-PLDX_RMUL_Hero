@@ -1,17 +1,20 @@
 #include "chassis.h"
 #include "VOFA.h"
-#include "arm_math.h"
+#include "arm_math_compat.h"
 #include "bsp_dwt.h"
+#include "bsp_log.h"
 #include "bsp_usart.h"
 #include "controller.h"
 #include "dji_motor.h"
 #include "general_def.h"
+#include "main.h"
 #include "math.h"
 #include "message_center.h"
 #include "power_controller.h"
 #include "referee_UI.h"
 #include "referee_task.h"
 #include "robot_def.h"
+#include "string.h"
 #include "super_cap.h"
 #include "sysid_task.h"
 #include "user_lib.h"
@@ -93,8 +96,8 @@ static const Chassis_Runtime_Config_t chassis_config = {
         },
     .force =
         {
-            .torque_feedforward_coeff = 0.75f, // 扭矩前馈系数(比例系数)
-            .friction_threshold_omega = 2.0f,  // rad/s - 摩擦补偿速度阈值
+            .torque_feedforward_coeff = 0.5f, // 扭矩前馈系数(比例系数)
+            .friction_threshold_omega = 2.0f, // rad/s - 摩擦补偿速度阈值
             .wheel_speed_feedback_coeff =
                 0.02f, // A·s/rad - 轮速反馈系数（降低增益减少振荡）
             .omega_error_lpf_alpha =
@@ -104,8 +107,7 @@ static const Chassis_Runtime_Config_t chassis_config = {
     .kinematics = {
         .velocity_lpf_alpha = 0.85f, // 速度估算滤波系数
         .speed_deadband = 25.0f,     // 速度死区阈值 (deg/s)
-        .follow_lpf_alpha = 0.95f,   // 跟随模式滤波系数
-        .rotate_speed = 3.0f         // 小陀螺模式旋转速度 (rad/s)
+        .rotate_speed = 4.5f         // 小陀螺模式旋转速度 (rad/s)
     }};
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体
@@ -117,14 +119,19 @@ static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
 #ifdef ONE_BOARD
-static Publisher_t *chassis_pub;                    // 用于发布底盘的数据
-static Subscriber_t *chassis_sub;                   // 用于订阅底盘的控制命令
-#endif                                              // !ONE_BOARD
-static Chassis_Ctrl_Cmd_s chassis_cmd_recv;         // 底盘接收到的控制命令
-static Chassis_Upload_Data_s chassis_feedback_data; // 底盘回传的反馈数据
+static Publisher_t *chassis_pub;                     // 用于发布底盘的数据
+static Subscriber_t *chassis_sub;                    // 用于订阅底盘的控制命令
+#endif                                               // !ONE_BOARD
+static Chassis_Ctrl_Cmd_s chassis_cmd_recv;          // 底盘接收到的控制命令
+static Chassis_Upload_Data_s chassis_feedback_data;  // 底盘回传的反馈数据
+static ext_map_command_t regular_map_command_cache;  // 0x0303桥接缓存
+static ext_map_robot_data_t regular_map_robot_cache; // 0x0305桥接缓存
+static ext_map_path_data_t regular_map_path_cache;   // 0x0307桥接缓存
+static ext_map_robot_custom_data_t regular_map_custom_cache; // 0x0308桥接缓存
+static uint8_t regular_bridge_seq = 0;                       // 常规桥接摘要序号
 
 static referee_info_t *referee_data; // 用于获取裁判系统的数据
-static Referee_Interactive_info_t
+static Referee_UI_Generated_State_t
     ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
 
 static SuperCapInstance *cap; // 超级电容
@@ -134,6 +141,7 @@ static PowerControllerInstance *power_ctrl = NULL; // 功率控制器实例
 static USARTInstance *vofa_usart = NULL;
 static uint8_t vofa_tx_buf[32];
 static VofaJustFloatSender_s vofa_sender;
+static uint32_t power_limit_hard_clamp_count = 0;
 
 static uint8_t VofaUsartIsReady(void *ctx) {
   USARTInstance *ins = (USARTInstance *)ctx;
@@ -167,7 +175,48 @@ static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb,
     *motor_rb; // left right forward back
 
 static PIDInstance chassis_follow_pid; // 底盘跟随云台PID控制器
-static float last_follow_wz = 0.0f; // 记录上一次跟随模式的wz输出，用于一阶滤波
+static uint32_t chassis_last_telemetry_ms = 0;
+static const uint32_t CHASSIS_TELEMETRY_PERIOD_MS = 500U;
+
+static void SyncGeneratedUIState(uint8_t comm_online, uint8_t cap_online,
+                                 uint16_t cap_energy) {
+  const int mild_threshold_percent = 90;
+  const int wild_threshold_percent = 110;
+  uint16_t heat_value = 0U;
+  uint16_t fire_allowance_count = 0U;
+  uint8_t fire_allow = 0U;
+
+  if (chassis_feedback_data.referee_online && referee_data != NULL) {
+    const uint16_t heat_limit =
+        referee_data->GameRobotState.shooter_barrel_heat_limit;
+    const uint16_t barrel_heat =
+        referee_data->PowerHeatData.shooter_42mm_barrel_heat;
+    heat_value = (heat_limit > barrel_heat) ? (heat_limit - barrel_heat) : 0U;
+    fire_allowance_count = (uint16_t)(heat_value / (uint16_t)HEAT_PER_SHOT_D);
+    fire_allow = (heat_value >= (uint16_t)HEAT_PER_SHOT_D) ? 1U : 0U;
+  }
+
+  ui_data.chassis_online = comm_online;
+  ui_data.chassis_mode = chassis_cmd_recv.chassis_mode;
+  ui_data.autoaim_on = chassis_cmd_recv.ui_autoaim_enabled ? 1U : 0U;
+  ui_data.fri_on = chassis_cmd_recv.ui_friction_on ? 1U : 0U;
+  ui_data.fire_allow = chassis_cmd_recv.ui_fire_allow ? 1U : 0U;
+  ui_data.cap_online = cap_online;
+  ui_data.stuck_active = chassis_cmd_recv.ui_stuck_active ? 1U : 0U;
+  ui_data.shoot_mode_display = chassis_cmd_recv.ui_loader_mode;
+  ui_data.refresh_request_seq = chassis_cmd_recv.ui_refresh_request_seq;
+  ui_data.heat_value = heat_value;
+  ui_data.fire_allowance_count = fire_allowance_count;
+  ui_data.cap_energy = cap_energy;
+
+  if (chassis_cmd_recv.chassis_speed_buff <= mild_threshold_percent) {
+    ui_data.power_mode = REFEREE_UI_POWER_MILD;
+  } else if (chassis_cmd_recv.chassis_speed_buff >= wild_threshold_percent) {
+    ui_data.power_mode = REFEREE_UI_POWER_WILD;
+  } else {
+    ui_data.power_mode = REFEREE_UI_POWER_NOR;
+  }
+}
 
 /* 功率控制相关变量已移至独立的power_controller模块 */
 
@@ -195,6 +244,94 @@ static float chassis_vx, chassis_vy; // 将云台系的速度投影到底盘坐�
 
 // 力控 + 速度内环：麦轮正运动学解算的目标轮速（rad/s）
 static float target_wheel_omega[4]; // 各轮目标角速度，用于速度内环反馈
+
+// 键鼠功率档位参数（对应 cmd 层 C 键循环：100% -> 80% -> 120%）
+static const int POWER_MODE_ECO_PERCENT = 80;
+static const int POWER_MODE_LIMIT_PERCENT = 100;
+static const int POWER_MODE_OVERDRIVE_PERCENT = 120;
+static const int POWER_MODE_ECO_THRESHOLD_PERCENT =
+    (POWER_MODE_ECO_PERCENT + POWER_MODE_LIMIT_PERCENT) / 2;
+static const int POWER_MODE_OVERDRIVE_THRESHOLD_PERCENT =
+    (POWER_MODE_LIMIT_PERCENT + POWER_MODE_OVERDRIVE_PERCENT) / 2;
+static const float POWER_MODE_ECO_SCALE = 0.80f;
+static const float POWER_MODE_LIMIT_SCALE = 1.00f;
+static const float POWER_MODE_OVERDRIVE_SCALE = 1.20f;
+static const uint8_t POWER_MODE_OVERDRIVE_MIN_CAP_ENERGY =
+    120; // 约 47% 电量阈值，低于阈值时超功率自动回退
+
+// 视觉跟踪友好机动策略（比赛前可一键关闭）
+#define CHASSIS_TRACKING_FRIENDLY_ENABLE 1
+static const float CHASSIS_TRACKING_LINEAR_SCALE = 0.85f;
+static const float CHASSIS_TRACKING_MAX_WZ = 2.5f;
+
+#if POWER_CONTROLLER_ENABLE
+/**
+ * @brief 根据键鼠档位和电容状态选择目标功率上限
+ * @param source_limit_w 基准功率上限（通常来自裁判/超电反馈）
+ * @param power_mode_percent cmd 层透传档位值（80/100/120）
+ * @param cap_online 超级电容在线标志
+ * @param cap_energy 超级电容能量(0~255)
+ * @param referee_limit_valid 裁判功率上限是否有效
+ * @param referee_limit_w 裁判系统实时功率上限
+ */
+static float SelectPowerLimitByMode(float source_limit_w,
+                                    int power_mode_percent, uint8_t cap_online,
+                                    uint8_t cap_energy,
+                                    uint8_t referee_limit_valid,
+                                    float referee_limit_w) {
+  float limit_scale = POWER_MODE_LIMIT_SCALE;
+
+  if (power_mode_percent >= POWER_MODE_OVERDRIVE_THRESHOLD_PERCENT) {
+    limit_scale = POWER_MODE_OVERDRIVE_SCALE;
+  } else if (power_mode_percent <= POWER_MODE_ECO_THRESHOLD_PERCENT) {
+    limit_scale = POWER_MODE_ECO_SCALE;
+  }
+
+  // 裁判离线时，禁止超功率档，避免越权输出
+  if (!referee_limit_valid && limit_scale > POWER_MODE_LIMIT_SCALE) {
+    limit_scale = POWER_MODE_LIMIT_SCALE;
+  }
+
+  // 超功率模式要求电容在线且能量充足，否则自动降级到额定档
+  if (limit_scale > POWER_MODE_LIMIT_SCALE &&
+      (!cap_online || cap_energy < POWER_MODE_OVERDRIVE_MIN_CAP_ENERGY)) {
+    limit_scale = POWER_MODE_LIMIT_SCALE;
+  }
+
+  float target_limit_w = source_limit_w * limit_scale;
+  float hard_limit_w = source_limit_w + MAX_CAP_POWER_OUT;
+  if (referee_limit_valid) {
+    hard_limit_w = referee_limit_w;
+  }
+  return float_constrain(target_limit_w, MIN_POWER_CONFIGURED, hard_limit_w);
+}
+
+static float ApplyPowerLimitHardClamp(float target_limit_w,
+                                      uint8_t referee_limit_valid,
+                                      float referee_limit_w) {
+  float clamped_limit_w = target_limit_w;
+  if (referee_limit_valid && referee_limit_w > MIN_POWER_CONFIGURED) {
+    clamped_limit_w = fminf(clamped_limit_w, referee_limit_w);
+  }
+  if (clamped_limit_w + 1e-3f < target_limit_w) {
+    power_limit_hard_clamp_count++;
+  }
+  if (clamped_limit_w < MIN_POWER_CONFIGURED) {
+    clamped_limit_w = MIN_POWER_CONFIGURED;
+  }
+  return clamped_limit_w;
+}
+#endif // POWER_CONTROLLER_ENABLE
+
+static Bullet_Speed_e SelectBulletSpeedByReferee(float bullet_speed_mps) {
+  if (bullet_speed_mps >= 24.0f) {
+    return SMALL_AMU_30;
+  }
+  if (bullet_speed_mps >= 16.5f) {
+    return SMALL_AMU_18;
+  }
+  return SMALL_AMU_15;
+}
 
 void ChassisInit() {
   // 四个轮子的参数一样,改tx_id和反转标志位即可
@@ -280,6 +417,7 @@ void ChassisInit() {
           },
       .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
       .send_data_len = sizeof(Chassis_Upload_Data_s),
+      .daemon_count = 30,
   };
   chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
 #endif                                        // CHASSIS_BOARD
@@ -290,7 +428,7 @@ void ChassisInit() {
   PowerControllerConfig_t power_config = {
       .k1_init = 0.22f,      // 转速损耗系数初始值（输出轴量纲）
       .k2_init = 1.2f,       // 力矩损耗系数初始值（输出轴量纲）
-      .k3 = 2.78f,           // 静态功率损耗（参考港科大）
+      .k3 = 5.10f,           // 静态功率损耗（参考港科大）
       .rls_lambda = 0.9999f, // RLS遗忘因子
       // 输出轴转矩常数 = 0.3 Nm/A
       .torque_constant = M3508_TORQUE_CONSTANT,
@@ -309,16 +447,16 @@ void ChassisInit() {
   // 底盘跟随云台PID控制器初始化（统一力控：输出角速度）
   // 注意：输出单位为角速度（rad/s），后续通过力控PID转换为扭矩
   PID_Init_Config_s follow_pid_config = {
-      .kp = 0.45f, // 单位：(rad/s)/度（角度误差→角速度）
-      .ki = 0.0f,  // 积分增益（可选开启）
-      .kd = 0.04f, // 微分增益
+      .kp = 0.115f, // 单位：(rad/s)/度（角度误差→角速度）
+      .ki = 0.0f,   // 积分增益（可选开启）
+      .kd = 0.0f,   // 微分增益
       // 微分低通滤波时间常数RC（秒）
       // RobotTask周期约2ms(500Hz)，取微分截止频率fc≈20Hz：
       // RC = 1/(2πfc) ≈ 1/(2π·20) ≈ 0.00796s
-      .Derivative_LPF_RC = 0.008f,
+      .Derivative_LPF_RC = 0.019f,
       .IntegralLimit = 0.0f, // 积分限幅：1 rad/s
-      .MaxOut = 5.5f,        // 最大输出：5 rad/s（底盘旋转角速度）
-      .DeadBand = 1.58f,     // 死区：0.25度（静止时更稳定）
+      .MaxOut = 10.0f,       // 最大输出：5 rad/s（底盘旋转角速度）
+      .DeadBand = 0.3f,      // 死区：0.25度（静止时更稳定）
       .Improve = PID_Derivative_On_Measurement | PID_DerivativeFilter,
   };
   PIDInit(&chassis_follow_pid, &follow_pid_config);
@@ -326,39 +464,37 @@ void ChassisInit() {
   /* ----------------力控策略PID初始化---------------- */
   // X方向力控PID初始化 (输出单位: N)
   PID_Init_Config_s force_x_pid_config = {
-      .kp = 200.0f,                // 比例增益 [N/(m/s)]
+      .kp = 525.0f,                // 比例增益 [N/(m/s)]
       .ki = 0.0f,                  // 积分增益 [N/(m·s)]
       .kd = 0.0f,                  // 微分增益 [N·s/m]（抑制超调）
       .Derivative_LPF_RC = 0.12f,  // 微分低通滤波
       .IntegralLimit = 100.0f,     // 积分限幅 [N]
       .MaxOut = MAX_CONTROL_FORCE, // 最大输出力 [N]
-      .DeadBand = 0.01f,           // 死区 [m/s]
+      .DeadBand = 0.03f,           // 死区 [m/s]
       .Improve = PID_Integral_Limit,
   };
   PIDInit(&chassis_force_x_pid, &force_x_pid_config);
 
   // Y方向力控PID初始化 (输出单位: N)
   PID_Init_Config_s force_y_pid_config = {
-      .kp = 200.0f,
+      .kp = 625.0f,
       .ki = 0.0f,
       .kd = 0.0f,
       .Derivative_LPF_RC = 0.02f,
       .IntegralLimit = 100.0f,
       .MaxOut = MAX_CONTROL_FORCE,
-      .DeadBand = 0.01f,
+      .DeadBand = 0.03f,
       .Improve = PID_Integral_Limit,
   };
   PIDInit(&chassis_force_y_pid, &force_y_pid_config);
 
   // 旋转扭矩PID初始化 (输出单位: N·m) - 优化参数减少振荡
   PID_Init_Config_s torque_pid_config = {
-      .kp = 8.0f, // 比例增益 [N·m/(rad/s)] - 从2.5降至1.5减少过冲
-      .ki = 0.0f, // 积分增益 [N·m/rad]
-      .kd = 0.1f, // 微分增益 [N·m·s/rad] - 增加阻尼抑制振荡
-      .MaxOut = 6.0f,
-      .DeadBand = 0.04f, // 死区 [rad/s] - 修复：从0.15增至0.3，减少回位后震荡
-      .Output_LPF_RC = 0.00087f,
-      .Improve = PID_OutputFilter | PID_Derivative_On_Measurement,
+      .kp = 80.0f, // 比例增益 [N·m/(rad/s)] - 从2.5降至1.5减少过冲
+      .ki = 0.0f,  // 积分增益 [N·m/rad]
+      .kd = 0.0f,  // 微分增益 [N·m·s/rad] - 增加阻尼抑制振荡
+      .MaxOut = 100.0f,
+      .DeadBand = 0.05f, // 死区 [rad/s] - 修复：从0.15增至0.3，减少回位后震荡
   };
   PIDInit(&chassis_torque_pid, &torque_pid_config);
 
@@ -367,21 +503,22 @@ void ChassisInit() {
   Chassis_SysIDTaskInit(motor_lf, motor_rf, motor_lb, motor_rb);
 }
 
-// 计算每个轮子到旋转中心的距离（单位：m）
-// 使用勾股定理: r = sqrt(x^2 + y^2)
-// WHEEL_BASE和TRACK_WIDTH在robot_def.h中已经是m，无需转换
+// 麦克纳姆轮旋转力臂计算（单位：m）
+// 物理模型：对于45度麦轮，底盘原地旋转时，单个轮子产生的横向和纵向摩擦力相等。
+// 等效力臂应当为：横向力臂与纵向力臂的绝对值之和（即曼哈顿距离 Lx +
+// Ly），而非欧氏距离。 WHEEL_BASE和TRACK_WIDTH在robot_def.h中已经是m，无需转换
 #define LF_CENTER                                                              \
-  sqrtf(powf(HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X, 2.0f) +                \
-        powf(HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y, 2.0f))
+  (fabsf(HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X) +                          \
+   fabsf(HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y))
 #define RF_CENTER                                                              \
-  sqrtf(powf(HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X, 2.0f) +                \
-        powf(HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y, 2.0f))
+  (fabsf(HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X) +                          \
+   fabsf(HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y))
 #define LB_CENTER                                                              \
-  sqrtf(powf(HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X, 2.0f) +                \
-        powf(HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y, 2.0f))
+  (fabsf(HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X) +                          \
+   fabsf(HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y))
 #define RB_CENTER                                                              \
-  sqrtf(powf(HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X, 2.0f) +                \
-        powf(HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y, 2.0f))
+  (fabsf(HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X) +                          \
+   fabsf(HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y))
 
 /* ==================================================== */
 /* ----------------力控策略核心函数---------------- */
@@ -391,13 +528,23 @@ void ChassisInit() {
  * @brief 麦轮正运动学解算 - 计算各轮目标角速度（用于速度内环反馈）
  * @note  参考robowalker的Kinematics_Inverse_Resolution思想
  *        从底盘速度(vx,vy,wz)解算出各轮的目标角速度
- *        这是力控+速度内环的关键：提供轮速目标值用于动态补偿
+ *
+ * 物理坐标系约定：
+ *  x轴：底盘正前方 (前进)
+ *  y轴：底盘正左方 (平移)
+ *  z轴：指向上方，符合右手螺旋定则，逆时针旋转为正 (Wz > 0)
+ *
+ * 速度分配公式（结合电机转向与麦轮45度辊子特性）：
+ *  V_RF = -Vx + Vy + Wz * RF_CENTER
+ *  V_LF = -Vx - Vy + Wz * LF_CENTER
+ *  V_LB =  Vx - Vy + Wz * LB_CENTER
+ *  V_RB =  Vx + Vy + Wz * RB_CENTER
+ *
+ * 注意：由于本代码中4个电机全部配置为 MOTOR_DIRECTION_REVERSE，
+ * 此处分配的符号(+Wz, -Vx)在发送到电机驱动后会被硬件取反，
+ * 最终与底盘受力模型完全吻合。
  */
 static void MecanumKinematicsCalculate() {
-  // 麦轮正运动学：从底盘速度解算各轮线速度
-  // v_wheel = v_chassis + ω × r_vec
-  // 对于45度麦轮，与力分配公式对应
-
   float vx = chassis_vx;
   float vy = chassis_vy;
   float wz = chassis_cmd_recv.wz;
@@ -447,9 +594,9 @@ static void EstimateChassisVelocity(void) {
   float rb_linear_vel = -motor_rb->measure.speed_aps * speed_to_linear;
 
   /* ===== 第二步：麦轮逆运动学解算 ===== */
-  // 计算旋转半径：从底盘中心到轮子的距离（预计算避免重复计算）
-  static const float rotation_radius = sqrtf(
-      HALF_WHEEL_BASE * HALF_WHEEL_BASE + HALF_TRACK_WIDTH * HALF_TRACK_WIDTH);
+  // 计算等效旋转力臂（预计算避免重复计算）
+  // 物理模型：对于45度麦轮，底盘原地旋转时的等效力臂为横向力臂与纵向力臂的绝对值之和
+  static const float rotation_radius = HALF_WHEEL_BASE + HALF_TRACK_WIDTH;
 
   // 应用逆运动学公式计算瞬时速度
   const float inv_4 = 0.25f; // 预计算1/4，避免除法
@@ -522,8 +669,16 @@ static void VelocityToForceControl(void) {
 }
 /**
  * @brief 力的动力学逆解算（力控核心环节2）
- * @note  将底盘合力分配到各个轮子，使用独立轮距力臂（修复振荡问题）
- *       修复：使用各轮独立力臂而非统一rotation_radius，与正解算保持一致
+ * @note  将底盘合力(Fx, Fy)与合扭矩(Tz)分配到各个轮子。
+ *
+ * 物理公式映射（必须与正运动学解算完全对称）：
+ *   F_RF = (-Fx + Fy) / 4 + Tz / (4 * RF_CENTER)
+ *   F_LF = (-Fx - Fy) / 4 + Tz / (4 * LF_CENTER)
+ *   F_LB = ( Fx - Fy) / 4 + Tz / (4 * LB_CENTER)
+ *   F_RB = ( Fx + Fy) / 4 + Tz / (4 * RB_CENTER)
+ *
+ * 修复说明：已弃用统一的rotation_radius，改为使用各轮独立力臂(XX_CENTER)，
+ * 并且使用正确的曼哈顿距离(Lx+Ly)作为力臂，消除旋转时的非对称抖动。
  */
 static void ForceDynamicsInverseResolution() {
   // RF (0)
@@ -614,7 +769,8 @@ static inline float CalculateFrictionCompensation(float target_omega) {
  * 3. 摩擦补偿
  * 4. 限幅保护
  */
-static void ForceToCurrentConversion(void) {
+// 调试力矩 PID 时可能会临时注释调用点，保留 unused 标记以避免 -Werror 中断编译
+static void __attribute__((unused)) ForceToCurrentConversion(void) {
   // 电机数组（不能使用static const，因为motor_lf等是运行时初始化的）
   DJIMotorInstance *motors[4] = {motor_rf, motor_lf, motor_lb, motor_rb};
 
@@ -636,11 +792,16 @@ static void ForceToCurrentConversion(void) {
     actual_omega = -actual_omega_raw;
 
     /* ===== 步骤3：速度反馈补偿 ===== */
-    float speed_feedback =
-        CalculateSpeedFeedback(target_wheel_omega[i], actual_omega, i);
+    // 【调试阶段2】暂时禁用速度内环，专注调试力控PID
+    // float speed_feedback =
+    //     CalculateSpeedFeedback(target_wheel_omega[i], actual_omega, i);
+    float speed_feedback = 0.0f;
 
     /* ===== 步骤4：摩擦补偿 ===== */
-    float friction_comp = CalculateFrictionCompensation(target_wheel_omega[i]);
+    // 【调试阶段2】暂时禁用摩擦补偿，专注调试力控PID
+    // float friction_comp =
+    // CalculateFrictionCompensation(target_wheel_omega[i]);
+    float friction_comp = 0.0f;
 
     /* ===== 步骤5：合成总电流 ===== */
     wheel_current[i] = base_current + speed_feedback + friction_comp;
@@ -652,6 +813,50 @@ static void ForceToCurrentConversion(void) {
 }
 
 /* 机器人底盘控制核心任务 */
+static void ResetPIDRuntimeState(PIDInstance *pid) {
+  if (pid == NULL) {
+    return;
+  }
+
+  pid->Measure = 0.0f;
+  pid->Last_Measure = 0.0f;
+  pid->Err = 0.0f;
+  pid->Last_Err = 0.0f;
+  pid->Last_ITerm = 0.0f;
+  pid->Pout = 0.0f;
+  pid->Iout = 0.0f;
+  pid->Dout = 0.0f;
+  pid->ITerm = 0.0f;
+  pid->Output = 0.0f;
+  pid->Last_Output = 0.0f;
+  pid->Last_Dout = 0.0f;
+  pid->Ref = 0.0f;
+  pid->dt = 0.0f;
+  pid->ERRORHandler.ERRORCount = 0U;
+  pid->ERRORHandler.ERRORType = PID_ERROR_NONE;
+  DWT_GetDeltaT(&pid->DWT_CNT);
+}
+
+static void ResetChassisControlState(void) {
+  ResetPIDRuntimeState(&chassis_follow_pid);
+  ResetPIDRuntimeState(&chassis_force_x_pid);
+  ResetPIDRuntimeState(&chassis_force_y_pid);
+  ResetPIDRuntimeState(&chassis_torque_pid);
+
+  chassis_estimated_vx = 0.0f;
+  chassis_estimated_vy = 0.0f;
+  chassis_estimated_wz = 0.0f;
+  force_x = 0.0f;
+  force_y = 0.0f;
+  torque_z = 0.0f;
+  chassis_vx = 0.0f;
+  chassis_vy = 0.0f;
+
+  memset(wheel_force, 0, sizeof(wheel_force));
+  memset(wheel_current, 0, sizeof(wheel_current));
+  memset(target_wheel_omega, 0, sizeof(target_wheel_omega));
+}
+
 void ChassisTask() {
 #if ENABLE_CHASSIS_SYSID
   // 系统辨识宏开关触发（ENABLE_CHASSIS_SYSID=1时有效）
@@ -665,13 +870,51 @@ void ChassisTask() {
     return;
   }
 
+  uint8_t comm_online = 1U;
+  uint8_t referee_online = RefereeIsOnline();
+  SuperCap_Rx_Data_s cap_rx_data = {0};
+  uint8_t cap_online = 0U;
+  uint16_t ui_cap_energy = 0U;
+
+  if (cap != NULL) {
+    cap_rx_data = SuperCapGetData(cap);
+    if (cap->can_ins != NULL && (cap->can_ins->rx_len > 0U) &&
+        ((cap_rx_data.error_code & 0x80U) == 0U)) {
+      float cap_energy_value = cap_rx_data.cap_energy;
+      if (cap_energy_value < 0.0f) {
+        cap_energy_value = 0.0f;
+      } else if (cap_energy_value > 65535.0f) {
+        cap_energy_value = 65535.0f;
+      }
+      cap_online = 1U;
+      ui_cap_energy = (uint16_t)cap_energy_value;
+    }
+  }
+
   // 后续增加没收到消息的处理(双板的情况)
   // 获取新的控制信息
 #ifdef ONE_BOARD
   SubGetMessage(chassis_sub, &chassis_cmd_recv);
 #endif
 #ifdef CHASSIS_BOARD
+  comm_online = CANCommIsOnline(chasiss_can_comm);
   chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
+  if (!comm_online) {
+    // 双板链路失联：强制零力并清零速度，禁止沿用旧指令
+    chassis_cmd_recv.chassis_mode = CHASSIS_ZERO_FORCE;
+    chassis_cmd_recv.vx = 0.0f;
+    chassis_cmd_recv.vy = 0.0f;
+    chassis_cmd_recv.wz = 0.0f;
+    chassis_cmd_recv.offset_angle = 0.0f;
+    chassis_cmd_recv.near_center_error = 0.0f;
+    chassis_cmd_recv.vision_is_tracking = 0U;
+    chassis_cmd_recv.image_online = 0U;
+    chassis_cmd_recv.image_target_locked = 0U;
+    chassis_cmd_recv.image_auto_fire_request = 0U;
+    chassis_cmd_recv.image_should_fire = 0U;
+    chassis_cmd_recv.ui_friction_on = 0U;
+    chassis_cmd_recv.ui_autoaim_enabled = 0U;
+  }
 #endif // CHASSIS_BOARD
 
   // === 应用遥控器速度增益 ===
@@ -679,26 +922,38 @@ void ChassisTask() {
   // 需要乘以增益转换为实际速度(m/s)
   chassis_cmd_recv.vx *= chassis_config.rc.max_linear_speed;
   chassis_cmd_recv.vy *= chassis_config.rc.max_linear_speed;
+#if CHASSIS_TRACKING_FRIENDLY_ENABLE
+  if (chassis_cmd_recv.vision_is_tracking) {
+    chassis_cmd_recv.vx *= CHASSIS_TRACKING_LINEAR_SCALE;
+    chassis_cmd_recv.vy *= CHASSIS_TRACKING_LINEAR_SCALE;
+  }
+#endif
   // 注意: wz(角速度)由底盘根据模式自动设定，不需要在这里处理
 
-  if (chassis_cmd_recv.chassis_mode ==
-      CHASSIS_ZERO_FORCE) { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
+  const uint8_t control_disabled =
+      (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) ? 1U : 0U;
+  if (control_disabled) {
     DJIMotorStop(motor_lf);
     DJIMotorStop(motor_rf);
     DJIMotorStop(motor_lb);
     DJIMotorStop(motor_rb);
-  } else { // 正常工作
-    DJIMotorEnable(motor_lf);
-    DJIMotorEnable(motor_rf);
-    DJIMotorEnable(motor_lb);
-    DJIMotorEnable(motor_rb);
+    DJIMotorSetRef(motor_lf, 0.0f);
+    DJIMotorSetRef(motor_rf, 0.0f);
+    DJIMotorSetRef(motor_lb, 0.0f);
+    DJIMotorSetRef(motor_rb, 0.0f);
+    ResetChassisControlState();
+    goto feedback_only;
   }
+
+  DJIMotorEnable(motor_lf);
+  DJIMotorEnable(motor_rf);
+  DJIMotorEnable(motor_lb);
+  DJIMotorEnable(motor_rb);
 
   // 根据控制模式设定旋转速度
   switch (chassis_cmd_recv.chassis_mode) {
   case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
     chassis_cmd_recv.wz = 0;
-    last_follow_wz = 0; // 重置滤波状态
     break;
 
   case CHASSIS_FOLLOW_GIMBAL_YAW: { // 跟随云台,统一力控链路
@@ -709,17 +964,25 @@ void ChassisTask() {
     // 修复：交换PID参数顺序，使云台右偏时底盘顺时针旋转
     float follow_angular_vel = -PIDCalculate(
         &chassis_follow_pid, chassis_cmd_recv.near_center_error, 0.0f);
+    // 对外环输出做轻微低通，降低 offset_angle/误差台阶对 wz 参考的直接冲击
+    static float follow_angular_vel_filtered = 0.0f;
+    follow_angular_vel = LowPassFilter_Float(follow_angular_vel, 0.15f,
+                                             &follow_angular_vel_filtered);
+#if CHASSIS_TRACKING_FRIENDLY_ENABLE
+    if (chassis_cmd_recv.vision_is_tracking) {
+      follow_angular_vel =
+          float_constrain(follow_angular_vel, -CHASSIS_TRACKING_MAX_WZ,
+                          CHASSIS_TRACKING_MAX_WZ);
+    }
+#endif
 
-    // 直接输出目标角速度（取消一阶滤波）
-    chassis_cmd_recv.wz = follow_angular_vel;
-    last_follow_wz = chassis_cmd_recv.wz;
     // wz统一为角速度（rad/s），后续通过chassis_torque_pid转换为扭矩
+    chassis_cmd_recv.wz = follow_angular_vel;
     break;
   }
 
   case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
     chassis_cmd_recv.wz = chassis_config.kinematics.rotate_speed; // rad/s
-    last_follow_wz = chassis_cmd_recv.wz; // 保存当前wz,便于切换后平滑过渡
     break;
 
   default:
@@ -759,7 +1022,6 @@ void ChassisTask() {
 #if POWER_CONTROLLER_ENABLE
   // 4. 功率限制（必须在发送电机指令前执行）
   // 4.1 获取超级电容数据
-  SuperCap_Rx_Data_s cap_rx_data = SuperCapGetData(cap);
 
   // 4.1.1 通过 VOFA 上位机实时发送超级电容反馈功率（W）
   // 说明：VOFA 走 DMA/IT
@@ -772,29 +1034,50 @@ void ChassisTask() {
     last_vofa_send_s = now_s;
   }
 
-  // 4.2 更新功率控制器数据（暂时无裁判系统，使用超级电容数据）
-  // 手动设定功率限制（根据实际测试调整，单位：W）
-  float manual_power_limit = 80.0f;
-
-  // 使用超级电容测量的数据
-  float cap_energy_buffer = (float)cap_rx_data.cap_energy; // 电容能量 (0-255)
-  float measured_power = cap_rx_data.chassis_power;        // 底盘功率 (W)
-
-  PowerUpdateRefereeData(power_ctrl, manual_power_limit, cap_energy_buffer,
-                         measured_power);
-
-  // 4.3 更新超级电容在线状态
+  // 4.2 更新超级电容在线状态
   // 在线判断：CAN有数据 且 错误码bit7=0（输出未关闭）
-  uint8_t cap_online =
-      (cap->can_ins->rx_len > 0 && (cap_rx_data.error_code & 0x80) == 0) ? 1
-                                                                         : 0;
   PowerUpdateCapData(power_ctrl, cap_rx_data.cap_energy, cap_online);
 
-  // 4.3.1 更新裁判系统在线状态
-  // TODO: 接入裁判系统后，从referee_data获取在线状态和机器人等级
-  // 暂时设为离线，使用手动功率限制
-  uint8_t referee_online = 0;
+  // 4.3 更新功率控制器数据（C键三档：100% / 80% / 120%）
+  // 基准功率优先使用裁判系统上限，异常时回退到超电反馈，再回退到80W
   uint8_t robot_level = 1; // 默认等级1
+  float referee_limit_w = 0.0f;
+  float referee_buffer_energy = 0.0f;
+  if (referee_online && referee_data != NULL) {
+    if (referee_data->GameRobotState.chassis_power_limit > 1U) {
+      referee_limit_w = (float)referee_data->GameRobotState.chassis_power_limit;
+    }
+    referee_buffer_energy = (float)referee_data->PowerHeatData.buffer_energy;
+    if (referee_data->GameRobotState.robot_level >= 1 &&
+        referee_data->GameRobotState.robot_level <= MAX_ROBOT_LEVEL) {
+      robot_level = referee_data->GameRobotState.robot_level;
+    }
+  }
+  uint8_t referee_limit_valid =
+      (referee_online && referee_limit_w > 1.0f) ? 1U : 0U;
+  float cap_limit_fallback_w = (cap_rx_data.chassis_power_limit > 1)
+                                   ? (float)cap_rx_data.chassis_power_limit
+                                   : 0.0f;
+  float source_limit_w =
+      referee_limit_valid
+          ? referee_limit_w
+          : ((cap_limit_fallback_w > 1.0f) ? cap_limit_fallback_w : 80.0f);
+  float target_limit_w = SelectPowerLimitByMode(
+      source_limit_w, chassis_cmd_recv.chassis_speed_buff, cap_online,
+      cap_rx_data.cap_energy, referee_limit_valid, referee_limit_w);
+  target_limit_w = ApplyPowerLimitHardClamp(target_limit_w, referee_limit_valid,
+                                            referee_limit_w);
+
+  // 反馈优先使用裁判系统数据，裁判离线时仅功率测量回退到超级电容
+  float feedback_power_w = (referee_online && referee_data != NULL)
+                               ? referee_data->PowerHeatData.chassis_power
+                               : cap_rx_data.chassis_power; // 底盘功率 (W)
+
+  PowerSetUserLimit(power_ctrl, target_limit_w);
+  PowerUpdateRefereeData(power_ctrl, target_limit_w, referee_buffer_energy,
+                         feedback_power_w);
+
+  // 4.3.1 更新裁判系统在线状态
   PowerUpdateRefereeOnline(power_ctrl, referee_online, robot_level);
 
   // 4.3.2 更新电机在线状态
@@ -892,17 +1175,152 @@ void ChassisTask() {
   // 6. 根据电机的反馈速度和IMU(如果有)计算真实速度
   // EstimateSpeed();
 
-  // // 获取裁判系统数据
-  // 建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
-  // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue ,
-  // 1:red chassis_feedback_data.enemy_color =
-  // referee_data->GameRobotState.robot_id > 7 ? 1 : 0;
-  // //
-  // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
-  // chassis_feedback_data.bullet_speed =
-  // referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
-  // chassis_feedback_data.rest_heat =
-  // referee_data->PowerHeatData.shooter_heat0;
+feedback_only:
+  // 裁判状态回传给云台板：由底盘作为裁判权威源统一发布
+  uint32_t referee_snapshot_ms = (uint32_t)DWT_GetTimeline_ms();
+  chassis_feedback_data.referee_online = referee_online;
+  chassis_feedback_data.regular_online = referee_online;
+  chassis_feedback_data.referee_ts_ms = referee_snapshot_ms;
+  chassis_feedback_data.regular_bridge_version = REGULAR_BRIDGE_VERSION;
+  chassis_feedback_data.regular_bridge_capability = REGULAR_BRIDGE_CAP_MASK;
+  chassis_feedback_data.regular_cmd_valid_mask = 0U;
+  chassis_feedback_data.regular_cmd_seq = regular_bridge_seq;
+  if (referee_online && referee_data != NULL) {
+    uint8_t robot_id = referee_data->GameRobotState.robot_id;
+    chassis_feedback_data.robot_id = robot_id;
+    if (robot_id >= 100U) {
+      chassis_feedback_data.enemy_color = COLOR_RED;
+    } else if (robot_id > 0U) {
+      chassis_feedback_data.enemy_color = COLOR_BLUE;
+    } else {
+      chassis_feedback_data.enemy_color = COLOR_NONE;
+    }
+
+    chassis_feedback_data.current_hp = referee_data->GameRobotState.current_HP;
+    chassis_feedback_data.chassis_power_limit =
+        referee_data->GameRobotState.chassis_power_limit;
+    chassis_feedback_data.buffer_energy =
+        referee_data->PowerHeatData.buffer_energy;
+    chassis_feedback_data.barrel_heat =
+        referee_data->PowerHeatData.shooter_42mm_barrel_heat;
+    chassis_feedback_data.barrel_heat_limit =
+        referee_data->GameRobotState.shooter_barrel_heat_limit;
+    chassis_feedback_data.barrel_cooling_value =
+        referee_data->GameRobotState.shooter_barrel_cooling_value;
+    chassis_feedback_data.bullet_speed_limit =
+        referee_data->ShootData.bullet_speed;
+
+    uint16_t heat_limit =
+        referee_data->GameRobotState.shooter_barrel_heat_limit;
+    uint16_t barrel_heat = referee_data->PowerHeatData.shooter_42mm_barrel_heat;
+    uint16_t rest_heat =
+        (heat_limit > barrel_heat) ? (heat_limit - barrel_heat) : 0U;
+    chassis_feedback_data.rest_heat =
+        (rest_heat > 255U) ? 255U : (uint8_t)rest_heat;
+
+    chassis_feedback_data.bullet_speed =
+        SelectBulletSpeedByReferee(referee_data->ShootData.bullet_speed);
+
+    ext_map_command_t map_command_tmp;
+    ext_map_robot_data_t map_robot_tmp;
+    ext_map_path_data_t map_path_tmp;
+    ext_map_robot_custom_data_t map_custom_tmp;
+    uint8_t cmd_valid_mask = 0U;
+
+    if (RefereeTryConsumeMapCommand(&map_command_tmp)) {
+      regular_map_command_cache = map_command_tmp;
+      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0303;
+    }
+    if (RefereeTryConsumeMapRobotData(&map_robot_tmp)) {
+      regular_map_robot_cache = map_robot_tmp;
+      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0305;
+    }
+    if (RefereeTryConsumeMapPathData(&map_path_tmp)) {
+      regular_map_path_cache = map_path_tmp;
+      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0307;
+    }
+    if (RefereeTryConsumeMapRobotCustomData(&map_custom_tmp)) {
+      regular_map_custom_cache = map_custom_tmp;
+      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0308;
+    }
+    if (cmd_valid_mask != 0U) {
+      regular_bridge_seq++;
+    }
+
+    chassis_feedback_data.regular_cmd_valid_mask = cmd_valid_mask;
+    chassis_feedback_data.regular_cmd_seq = regular_bridge_seq;
+    chassis_feedback_data.map_target_x =
+        regular_map_command_cache.target_position_x;
+    chassis_feedback_data.map_target_y =
+        regular_map_command_cache.target_position_y;
+    chassis_feedback_data.map_target_robot_id =
+        regular_map_command_cache.target_robot_id;
+    chassis_feedback_data.map_cmd_keyboard =
+        regular_map_command_cache.cmd_keyboard;
+    chassis_feedback_data.map_hero_x = regular_map_robot_cache.hero_position_x;
+    chassis_feedback_data.map_hero_y = regular_map_robot_cache.hero_position_y;
+    chassis_feedback_data.map_sentry_x =
+        regular_map_robot_cache.sentry_position_x;
+    chassis_feedback_data.map_sentry_y =
+        regular_map_robot_cache.sentry_position_y;
+    chassis_feedback_data.map_path_intention = regular_map_path_cache.intention;
+    chassis_feedback_data.map_custom_head0 =
+        regular_map_custom_cache.raw_data[0];
+    chassis_feedback_data.map_custom_head1 =
+        regular_map_custom_cache.raw_data[1];
+    chassis_feedback_data.map_custom_head2 =
+        regular_map_custom_cache.raw_data[2];
+    chassis_feedback_data.map_custom_head3 =
+        regular_map_custom_cache.raw_data[3];
+  } else {
+    chassis_feedback_data.enemy_color = COLOR_NONE;
+    chassis_feedback_data.robot_id = 0U;
+    chassis_feedback_data.current_hp = 0;
+    chassis_feedback_data.chassis_power_limit = 0U;
+    chassis_feedback_data.buffer_energy = 0;
+    chassis_feedback_data.barrel_heat = 0U;
+    chassis_feedback_data.barrel_heat_limit = 0U;
+    chassis_feedback_data.barrel_cooling_value = 0U;
+    chassis_feedback_data.rest_heat = 0;
+    chassis_feedback_data.bullet_speed_limit = 0.0f;
+    chassis_feedback_data.bullet_speed = SMALL_AMU_15;
+    regular_bridge_seq = 0U;
+    chassis_feedback_data.regular_cmd_seq = 0U;
+    chassis_feedback_data.regular_cmd_valid_mask = 0U;
+    chassis_feedback_data.map_target_x = 0.0f;
+    chassis_feedback_data.map_target_y = 0.0f;
+    chassis_feedback_data.map_target_robot_id = 0U;
+    chassis_feedback_data.map_cmd_keyboard = 0U;
+    chassis_feedback_data.map_hero_x = 0U;
+    chassis_feedback_data.map_hero_y = 0U;
+    chassis_feedback_data.map_sentry_x = 0U;
+    chassis_feedback_data.map_sentry_y = 0U;
+    chassis_feedback_data.map_path_intention = 0U;
+    chassis_feedback_data.map_custom_head0 = 0U;
+    chassis_feedback_data.map_custom_head1 = 0U;
+    chassis_feedback_data.map_custom_head2 = 0U;
+    chassis_feedback_data.map_custom_head3 = 0U;
+
+    memset(&regular_map_command_cache, 0, sizeof(regular_map_command_cache));
+    memset(&regular_map_robot_cache, 0, sizeof(regular_map_robot_cache));
+    memset(&regular_map_path_cache, 0, sizeof(regular_map_path_cache));
+    memset(&regular_map_custom_cache, 0, sizeof(regular_map_custom_cache));
+  }
+
+  SyncGeneratedUIState(comm_online, cap_online, ui_cap_energy);
+
+  uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+  if ((now_ms - chassis_last_telemetry_ms) >= CHASSIS_TELEMETRY_PERIOD_MS) {
+    LOGINFO("[chassis-link] referee=%u comm=%u power_mode=%d track=%u "
+            "img_on=%u img_lock=%u fire_req=%u fire=%u heat=%u hp=%u",
+            referee_online, comm_online, chassis_cmd_recv.chassis_speed_buff,
+            chassis_cmd_recv.vision_is_tracking, chassis_cmd_recv.image_online,
+            chassis_cmd_recv.image_target_locked,
+            chassis_cmd_recv.image_auto_fire_request,
+            chassis_cmd_recv.image_should_fire, chassis_feedback_data.rest_heat,
+            chassis_feedback_data.current_hp);
+    chassis_last_telemetry_ms = now_ms;
+  }
 
   // 推送反馈消息
 #ifdef ONE_BOARD

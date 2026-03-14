@@ -113,6 +113,7 @@ bsp/gpio/bsp_gpio.c \
 bsp/spi/bsp_spi.c \
 bsp/iic/bsp_iic.c \
 bsp/can/bsp_can.c \
+bsp/usart/bsp_usart_async.c \
 bsp/usart/bsp_usart.c \
 bsp/usb/bsp_usb.c \
 bsp/log/bsp_log.c \

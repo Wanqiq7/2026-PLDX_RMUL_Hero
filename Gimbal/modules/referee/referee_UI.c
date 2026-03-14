@@ -335,9 +335,17 @@ void UICharDraw(String_Data_t *graph, char graphname[3], uint32_t Graph_Operate,
 
 	va_list ap;
 	va_start(ap, fmt);
-	vsprintf((char *)graph->show_Data, fmt, ap); // 使用参数列表进行格式化并输出到字符串
+	int written = vsnprintf((char *)graph->show_Data, sizeof(graph->show_Data), fmt, ap); // 有界格式化，避免越界
 	va_end(ap);
-	graph->Graph_Control.end_angle = strlen((const char *)graph->show_Data);
+	if (written < 0)
+	{
+		graph->show_Data[0] = '\0';
+	}
+	else if ((size_t)written >= sizeof(graph->show_Data))
+	{
+		graph->show_Data[sizeof(graph->show_Data) - 1] = '\0';
+	}
+	graph->Graph_Control.end_angle = strnlen((const char *)graph->show_Data, sizeof(graph->show_Data));
 }
 
 /* UI推送函数（使更改生效）
@@ -378,6 +386,9 @@ void UIGraphRefresh(referee_id_t *_id, int cnt, ...)
 	case 7:
 		UI_GraphReFresh_data.datahead.data_cmd_id = UI_Data_ID_Draw7;
 		break;
+	default:
+		va_end(ap);
+		return;
 	}
 
 	UI_GraphReFresh_data.datahead.receiver_ID = _id->Cilent_ID;
@@ -391,6 +402,7 @@ void UIGraphRefresh(referee_id_t *_id, int cnt, ...)
 	}
 	Append_CRC16_Check_Sum(buffer, temp_datalength);
 	RefereeSend(buffer, temp_datalength);
+	UI_Seq++; // 包序号+1
 
 	va_end(ap); // 结束可变参数的获取
 }

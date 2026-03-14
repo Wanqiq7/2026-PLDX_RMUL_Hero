@@ -1,75 +1,139 @@
-#ifndef BSP_RC_H
-#define BSP_RC_H
+#ifndef BSP_USART_H
+#define BSP_USART_H
 
+#include <stddef.h>
 #include <stdint.h>
+
 #include "main.h"
 
 #define DEVICE_USART_CNT 3     // C板至多分配3个串口
-#define USART_RXBUFF_LIMIT 256 // 如果协议需要更大的buff,请修改这里
+#define USART_RXBUFF_LIMIT 512 // legacy 固定帧兼容缓存上限
 
-// 模块回调函数,用于解析协议
-typedef void (*usart_module_callback)();
+typedef struct USARTInstance USARTInstance;
+typedef struct USART_Read_Port_s USART_Read_Port_s;
+typedef struct USART_Write_Port_s USART_Write_Port_s;
+
+// legacy 模块回调函数,用于兼容当前 fixed-length 模块
+// Gimbal 旧接口带 size 参数,因此兼容层仍会把实际交付的固定帧长度传入
+typedef void (*usart_module_callback)(uint16_t size);
+
+// 新操作完成回调,用于 CALLBACK 模式
+typedef void (*usart_operation_callback)(void *user_arg, int status);
 
 /* 发送模式枚举 */
 typedef enum
 {
-    USART_TRANSFER_NONE=0,
+    USART_TRANSFER_NONE = 0,
     USART_TRANSFER_BLOCKING,
     USART_TRANSFER_IT,
     USART_TRANSFER_DMA,
 } USART_TRANSFER_MODE;
 
-// 串口实例结构体,每个module都要包含一个实例.
-// 由于串口是独占的点对点通信,所以不需要考虑多个module同时使用一个串口的情况,因此不用加入id;当然也可以选择加入,这样在bsp层可以访问到module的其他信息
+// USART 通用返回状态
+typedef enum
+{
+    USART_STATUS_OK = 0,
+    USART_STATUS_PENDING,
+    USART_STATUS_BUSY,
+    USART_STATUS_FULL,
+    USART_STATUS_EMPTY,
+    USART_STATUS_TIMEOUT,
+    USART_STATUS_FAILED,
+    USART_STATUS_INIT_ERR,
+    USART_STATUS_INVALID_PARAM,
+    USART_STATUS_NOT_SUPPORT,
+} USART_Status_e;
+
+// USART 异步操作模式,与 libxr_rw 的 BLOCK/CALLBACK/POLLING 语义对齐
+typedef enum
+{
+    USART_OPERATION_NONE = 0,
+    USART_OPERATION_CALLBACK,
+    USART_OPERATION_BLOCK,
+    USART_OPERATION_POLLING,
+} USART_Operation_Type_e;
+
+// POLLING 模式状态
+typedef enum
+{
+    USART_POLLING_READY = 0,
+    USART_POLLING_RUNNING,
+    USART_POLLING_DONE,
+    USART_POLLING_ERROR,
+} USART_Polling_Status_e;
+
+// USART 读/写操作描述
 typedef struct
 {
-    uint8_t recv_buff[USART_RXBUFF_LIMIT]; // 预先定义的最大buff大小,如果太小请修改USART_RXBUFF_LIMIT
-    uint8_t recv_buff_size;                // 模块接收一包数据的大小
-    UART_HandleTypeDef *usart_handle;      // 实例对应的usart_handle
-    usart_module_callback module_callback; // 解析收到的数据的回调函数
-} USARTInstance;
+    USART_Operation_Type_e type;
+    union
+    {
+        struct
+        {
+            usart_operation_callback callback;
+            void *user_arg;
+        } callback_info;
+        struct
+        {
+            volatile USART_Polling_Status_e *status;
+        } polling_info;
+        struct
+        {
+            void *wait_obj;
+            uint32_t timeout_ms;
+        } block_info;
+    } arg;
+} USART_Operation_s;
+
+#include "bsp_usart_async.h"
+
+// 串口实例结构体,每个 module 都拥有自己的 USARTInstance
+// 兼容策略:
+// 1. recv_buff/module_callback 仅服务于 legacy fixed-length 模块
+// 2. read_port/write_port 是新接口唯一推荐入口
+// 3. owner_id 参考 CAN 的 id/parent pointer 设计,避免长期依赖文件内全局单例指针
+struct USARTInstance
+{
+    uint8_t recv_buff[USART_RXBUFF_LIMIT]; // legacy 固定帧兼容缓存
+    uint16_t rx_data_len;                  // legacy 缓存中的有效长度
+    uint16_t recv_buff_size;               // legacy 模块期望的固定帧长度
+    UART_HandleTypeDef *usart_handle;      // 实例对应的 usart_handle
+    usart_module_callback module_callback; // legacy 接收回调
+    void *owner_id;                        // 拥有该 USART 实例的 module 指针
+
+    uint16_t rx_fifo_size;   // 新 RX 软件 FIFO 容量
+    uint16_t tx_fifo_size;   // 新 TX 数据 FIFO 容量
+    uint8_t tx_queue_depth;  // 新 TX 元信息队列深度
+
+    void *driver_context;                    // BSP 私有驱动上下文,Module 层禁止访问
+    USART_Read_Port_s *read_port;            // 新读端口
+    USART_Write_Port_s *write_port;          // 新写端口
+};
 
 /* usart 初始化配置结构体 */
 typedef struct
 {
-    uint8_t recv_buff_size;                // 模块接收一包数据的大小
-    UART_HandleTypeDef *usart_handle;      // 实例对应的usart_handle
-    usart_module_callback module_callback; // 解析收到的数据的回调函数
+    uint16_t recv_buff_size;               // legacy 模块接收固定帧长度,无 legacy 需求时可为0
+    uint16_t rx_fifo_size;                 // 新 RX FIFO 容量
+    uint16_t tx_fifo_size;                 // 新 TX FIFO 容量
+    uint8_t tx_queue_depth;                // 新 TX 元信息队列深度
+    UART_HandleTypeDef *usart_handle;      // 实例对应的 usart_handle
+    usart_module_callback module_callback; // legacy 解析收到数据的回调函数
+    void *owner_id;                        // 拥有该 USART 实例的 module 指针
 } USART_Init_Config_s;
 
-/**
- * @brief 注册一个串口实例,返回一个串口实例指针
- *
- * @param init_config 传入串口初始化结构体
- */
 USARTInstance *USARTRegister(USART_Init_Config_s *init_config);
-
-/**
- * @brief 启动串口服务,需要传入一个usart实例.一般用于lost callback的情况(使用串口的模块daemon)
- *
- * @param _instance
- */
 void USARTServiceInit(USARTInstance *_instance);
-
-
-/**
- * @brief 通过调用该函数可以发送一帧数据,需要传入一个usart实例,发送buff以及这一帧的长度
- * @note 在短时间内连续调用此接口,若采用IT/DMA会导致上一次的发送未完成而新的发送取消.
- * @note 若希望连续使用DMA/IT进行发送,请配合USARTIsReady()使用,或自行为你的module实现一个发送队列和任务.
- * @todo 是否考虑为USARTInstance增加发送队列以进行连续发送?
- * 
- * @param _instance 串口实例
- * @param send_buf 待发送数据的buffer
- * @param send_size how many bytes to send
- */
-void USARTSend(USARTInstance *_instance, uint8_t *send_buf, uint16_t send_size,USART_TRANSFER_MODE mode);
-
-/**
- * @brief 判断串口是否准备好,用于连续或异步的IT/DMA发送
- *
- * @param _instance 要判断的串口实例
- * @return uint8_t ready 1, busy 0
- */
+void USARTSend(USARTInstance *_instance, uint8_t *send_buf, uint16_t send_size,
+               USART_TRANSFER_MODE mode);
 uint8_t USARTIsReady(USARTInstance *_instance);
+
+USART_Status_e USARTRead(USARTInstance *_instance, uint8_t *recv_buf, uint16_t recv_size,
+                         USART_Operation_s *operation, uint8_t in_isr);
+USART_Status_e USARTWrite(USARTInstance *_instance, const uint8_t *send_buf,
+                          uint16_t send_size, USART_Operation_s *operation,
+                          uint8_t in_isr);
+void USARTReadPortProcessPending(USARTInstance *_instance, uint8_t in_isr);
+USART_Status_e USARTWritePortKick(USARTInstance *_instance, uint8_t in_isr);
 
 #endif

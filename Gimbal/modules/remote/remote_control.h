@@ -42,15 +42,16 @@
 #define switch_is_up(s) (s == RC_SW_UP)
 
 /* ----------------------- PC Key Definition-------------------------------- */
-// 对应key[x][0~16],获取对应的键;例如通过key[KEY_PRESS][Key_W]获取W键是否按下,后续改为位域后删除
+// 对应 DT7/DR16 手册中的 16bit 键盘位定义
+// bit0~bit15 依次为: W S A D Q E Shift Ctrl R F G Z X C V B
 #define Key_W 0
 #define Key_S 1
-#define Key_D 2
-#define Key_A 3
-#define Key_Shift 4
-#define Key_Ctrl 5
-#define Key_Q 6
-#define Key_E 7
+#define Key_A 2
+#define Key_D 3
+#define Key_Q 4
+#define Key_E 5
+#define Key_Shift 6
+#define Key_Ctrl 7
 #define Key_R 8
 #define Key_F 9
 #define Key_G 10
@@ -61,29 +62,26 @@
 #define Key_B 15
 
 /* ----------------------- Data Struct ------------------------------------- */
-// 待测试的位域结构体,可以极大提升解析速度
-typedef union
+// 键盘状态结构体
+// 注意: 该结构仅供上层逻辑读取, 协议解码时请以显式 bitmask 为准。
+typedef struct
 {
-    struct // 用于访问键盘状态
-    {
-        uint16_t w : 1;
-        uint16_t s : 1;
-        uint16_t d : 1;
-        uint16_t a : 1;
-        uint16_t shift : 1;
-        uint16_t ctrl : 1;
-        uint16_t q : 1;
-        uint16_t e : 1;
-        uint16_t r : 1;
-        uint16_t f : 1;
-        uint16_t g : 1;
-        uint16_t z : 1;
-        uint16_t x : 1;
-        uint16_t c : 1;
-        uint16_t v : 1;
-        uint16_t b : 1;
-    };
-    uint16_t keys; // 用于memcpy而不需要进行强制类型转换
+    uint16_t w : 1;
+    uint16_t s : 1;
+    uint16_t a : 1;
+    uint16_t d : 1;
+    uint16_t q : 1;
+    uint16_t e : 1;
+    uint16_t shift : 1;
+    uint16_t ctrl : 1;
+    uint16_t r : 1;
+    uint16_t f : 1;
+    uint16_t g : 1;
+    uint16_t z : 1;
+    uint16_t x : 1;
+    uint16_t c : 1;
+    uint16_t v : 1;
+    uint16_t b : 1;
 } Key_t;
 
 // @todo 当前结构体嵌套过深,需要进行优化
@@ -95,7 +93,7 @@ typedef struct
         int16_t rocker_l1; // 左竖直
         int16_t rocker_r_; // 右水平
         int16_t rocker_r1; // 右竖直
-        int16_t dial;      // 侧边拨轮
+        uint16_t aux_raw16; // 协议尾部16bit原始值(兼容旧工程附加通道/拨杆反馈)
 
         uint8_t switch_left;  // 左侧开关
         uint8_t switch_right; // 右侧开关
@@ -104,6 +102,7 @@ typedef struct
     {
         int16_t x;
         int16_t y;
+        int16_t z;
         uint8_t press_l;
         uint8_t press_r;
     } mouse;
@@ -129,5 +128,12 @@ RC_ctrl_t *RemoteControlInit(UART_HandleTypeDef *rc_usart_handle);
  * @return uint8_t 1:在线 0:离线
  */
 uint8_t RemoteControlIsOnline();
+
+/**
+ * @brief 推进遥控器串口显式读取流程
+ *
+ * @note 需要在任务上下文中周期调用,避免在 UART ISR 中直接解析 SBUS 数据
+ */
+void RemoteControlProcess(void);
 
 #endif

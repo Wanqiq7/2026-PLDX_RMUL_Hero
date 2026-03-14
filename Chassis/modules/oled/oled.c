@@ -301,21 +301,30 @@ void OLED_show_string(uint8_t row, uint8_t col, uint8_t *chr)
 void OLED_printf(uint8_t row, uint8_t col, const char *fmt,...)
 {
     static uint8_t LCD_BUF[128] = {0};
-    static va_list ap;
     uint8_t remain_size = 0;
 
     if ((row > 4) || (col > 20) )
     {
         return;
     }
+    va_list ap;
     va_start(ap, fmt);
-
-    vsprintf((char *)LCD_BUF, fmt, ap);
-
+    int written = vsnprintf((char *)LCD_BUF, sizeof(LCD_BUF), fmt, ap);
     va_end(ap);
+    if (written < 0)
+    {
+        LCD_BUF[0] = '\0';
+    }
+    else if ((size_t)written >= sizeof(LCD_BUF))
+    {
+        LCD_BUF[sizeof(LCD_BUF) - 1] = '\0';
+    }
 
     remain_size = 21 - col;
-
+    if (remain_size >= sizeof(LCD_BUF))
+    {
+        remain_size = sizeof(LCD_BUF) - 1;
+    }
     LCD_BUF[remain_size] = '\0';
 
     OLED_show_string(row, col, LCD_BUF);

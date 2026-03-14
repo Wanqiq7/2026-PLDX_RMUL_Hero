@@ -104,7 +104,7 @@ void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 115200;
+  huart6.Init.BaudRate = 921600;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
@@ -274,8 +274,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     hdma_usart6_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
     hdma_usart6_rx.Init.Mode = DMA_NORMAL;
     hdma_usart6_rx.Init.Priority = DMA_PRIORITY_HIGH;
-    hdma_usart6_rx.Init.FIFOMode = DMA_FIFOMODE_ENABLE;
-    hdma_usart6_rx.Init.FIFOThreshold = DMA_FIFO_THRESHOLD_FULL;
+    /* RX 侧保持 direct mode，与 libxr 的 ReceiveToIdle + NDTR 前提一致。 */
+    hdma_usart6_rx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
     hdma_usart6_rx.Init.MemBurst = DMA_MBURST_SINGLE;
     hdma_usart6_rx.Init.PeriphBurst = DMA_PBURST_SINGLE;
     if (HAL_DMA_Init(&hdma_usart6_rx) != HAL_OK)

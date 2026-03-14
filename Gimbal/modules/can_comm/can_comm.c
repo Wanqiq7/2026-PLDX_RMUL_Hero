@@ -74,7 +74,8 @@ static void CANCommLostCallback(void *cancomm)
 {
     CANCommInstance *comm = (CANCommInstance *)cancomm;
     CANCommResetRx(comm);
-    LOGWARNING("[can_comm] can comm rx[%d] lost, reset rx state.", &comm->can_ins->rx_id);
+    LOGWARNING("[can_comm] can comm rx[%lu] lost, reset rx state.",
+               (unsigned long)comm->can_ins->rx_id);
 }
 
 CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)

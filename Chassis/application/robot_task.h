@@ -12,7 +12,6 @@
 #include "ins_task.h"
 #include "master_process.h"
 #include "motor_task.h"
-#include "power_controller.h" // 新增：功率控制模块
 #include "referee_task.h"
 #include "robot.h"
 #include "sysid_task.h"
@@ -26,9 +25,6 @@ osThreadId daemonTaskHandle;
 osThreadId uiTaskHandle;
 osThreadId sysidTaskHandle;
 
-#if POWER_CONTROLLER_ENABLE
-osThreadId powerTaskHandle; // 新增：功率控制任务句柄
-#endif
 
 void StartINSTASK(void const *argument);
 void StartMOTORTASK(void const *argument);
@@ -37,9 +33,6 @@ void StartROBOTTASK(void const *argument);
 void StartUITASK(void const *argument);
 void StartSYSIDTASK(void const *argument);
 
-#if POWER_CONTROLLER_ENABLE
-void StartPOWERTASK(void const *argument); // 新增：功率控制任务
-#endif
 
 /**
  * @brief 初始化机器人任务,所有持续运行的任务都在这里初始化
@@ -67,12 +60,6 @@ void OSTaskInit() {
   osThreadDef(sysidtask, StartSYSIDTASK, osPriorityAboveNormal, 0, 512);
   sysidTaskHandle = osThreadCreate(osThread(sysidtask), NULL);
 
-#if POWER_CONTROLLER_ENABLE
-  // 功率控制任务：优先级设置为Normal，略低于Robot任务，周期2ms (500Hz)
-  // 仅在POWER_CONTROLLER_ENABLE=1时创建
-  osThreadDef(powertask, StartPOWERTASK, osPriorityNormal, 0, 256);
-  powerTaskHandle = osThreadCreate(osThread(powertask), NULL);
-#endif
 
   HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
@@ -102,10 +89,10 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument) {
     motor_start = DWT_GetTimeline_ms();
     MotorControlTask();
     motor_dt = DWT_GetTimeline_ms() - motor_start;
-    // 500Hz: 2ms周期
-    if (motor_dt > 2)
+    // 1kHz: 1ms周期
+    if (motor_dt > 1)
       LOGERROR("[freeRTOS] MOTOR Task is being DELAY! dt = [%f]", &motor_dt);
-    osDelay(2);
+    osDelay(1);
   }
 }
 
@@ -130,16 +117,16 @@ __attribute__((noreturn)) void StartROBOTTASK(void const *argument) {
   static float robot_dt;
   static float robot_start;
   LOGINFO("[freeRTOS] ROBOT core Task Start");
-  // 1kHz：底盘控制任务提升至1ms周期
+  // 500Hz：底盘控制任务回退到2ms周期
   for (;;) {
     robot_start = DWT_GetTimeline_ms();
     RobotTask();
     robot_dt = DWT_GetTimeline_ms() - robot_start;
-    // 1kHz: 1ms周期
-    if (robot_dt > 1)
+    // 500Hz: 2ms周期
+    if (robot_dt > 2)
       LOGERROR("[freeRTOS] ROBOT core Task is being DELAY! dt = [%f]",
                &robot_dt);
-    osDelay(1); // 1kHz: 1ms周期
+    osDelay(2); // 500Hz: 2ms周期
   }
 }
 
@@ -174,31 +161,3 @@ __attribute__((noreturn)) void StartSYSIDTASK(void const *argument) {
   }
 }
 
-#if POWER_CONTROLLER_ENABLE
-/**
- * @brief 功率控制任务
- * @note 独立任务，负责RLS参数辨识和能量环控制
- *       优先级略低于Robot任务，周期2ms (500Hz)
- *       仅在POWER_CONTROLLER_ENABLE=1时编译
- */
-__attribute__((noreturn)) void StartPOWERTASK(void const *argument) {
-  static float power_start;
-  static float power_dt;
-  LOGINFO("[freeRTOS] Power Controller Task Start");
-
-  // 等待底盘初始化完成
-  osDelay(100);
-
-  for (;;) {
-    // 500Hz: 2ms周期
-    power_start = DWT_GetTimeline_ms();
-    PowerControllerTask(); // RLS更新 + 能量环控制
-    power_dt = DWT_GetTimeline_ms() - power_start;
-
-    if (power_dt > 2)
-      LOGERROR("[freeRTOS] POWER Task is being DELAY! dt = [%f]", &power_dt);
-
-    osDelay(2);
-  }
-}
-#endif

@@ -21,4 +21,10 @@ void MyUIInit();
  */
 void UITask();
 
+/**
+ * @brief 查询裁判UI任务是否完成初始化
+ * @return 1: 已就绪, 0: 未就绪
+ */
+uint8_t RefereeTaskIsReady(void);
+
 #endif // REFEREE_H

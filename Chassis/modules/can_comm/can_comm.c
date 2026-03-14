@@ -97,7 +97,8 @@ CANCommInstance *CANCommInit(CANComm_Init_Config_s *comm_config)
     Daemon_Init_Config_s daemon_config = {
         .callback = CANCommLostCallback,
         .owner_id = (void *)ins,
-        .reload_count = comm_config->daemon_count,
+        .reload_count = comm_config->daemon_count == 0 ? 30 : comm_config->daemon_count,
+        .init_count = comm_config->daemon_count == 0 ? 30 : comm_config->daemon_count,
     };
     ins->comm_daemon = DaemonRegister(&daemon_config);
     return ins;

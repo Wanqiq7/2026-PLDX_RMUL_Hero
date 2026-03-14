@@ -19,11 +19,15 @@
 #include "super_cap.h"
 #include "user_lib.h"
 
-#include "arm_math.h"
+#include "main.h"
+#include "arm_math_compat.h"
 #include "bsp_dwt.h"
+#include "bsp_log.h"
 #include "controller.h"
 #include "general_def.h"
 #include "referee_UI.h"
+
+#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
 
 /* 根据robot_def.h中的macro自动计算的参数 */
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f)     // 半轴距
@@ -63,6 +67,7 @@ static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb,
 
 static PIDInstance chassis_follow_pid; // 底盘跟随云台PID控制器
 static float last_follow_wz = 0.0f; // 记录上一次跟随模式的wz输出，用于一阶滤波
+static uint32_t chassis_last_can_warn_ms = 0U; // CAN 失联告警节流
 
 /* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
 static float chassis_vx, chassis_vy;     // 将云台系的速度投影到底盘
@@ -412,13 +417,39 @@ static void EstimateSpeed() {
 
 /* 机器人底盘控制核心任务 */
 void ChassisTask() {
+#ifdef CHASSIS_BOARD
+  uint8_t comm_online = 1U;
+#endif
   // 后续增加没收到消息的处理(双板的情况)
   // 获取新的控制信息
 #ifdef ONE_BOARD
   SubGetMessage(chassis_sub, &chassis_cmd_recv);
 #endif
 #ifdef CHASSIS_BOARD
-  chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
+  comm_online = (chasiss_can_comm != NULL) ? CANCommIsOnline(chasiss_can_comm) : 0U;
+  if (comm_online) {
+    Chassis_Ctrl_Cmd_s *recv_cmd = (Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
+    if (recv_cmd != NULL) {
+      chassis_cmd_recv = *recv_cmd;
+    } else {
+      comm_online = 0U;
+    }
+  }
+
+  if (!comm_online) {
+    // 双板链路失联：强制零力并清零速度指令，禁止沿用旧控制量
+    chassis_cmd_recv.chassis_mode = CHASSIS_ZERO_FORCE;
+    chassis_cmd_recv.vx = 0.0f;
+    chassis_cmd_recv.vy = 0.0f;
+    chassis_cmd_recv.wz = 0.0f;
+    chassis_cmd_recv.near_center_error = 0.0f;
+
+    uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+    if ((now_ms - chassis_last_can_warn_ms) >= 500U) {
+      LOGWARNING("[chassis] cmd CAN link offline, fallback to zero-force");
+      chassis_last_can_warn_ms = now_ms;
+    }
+  }
 #endif // CHASSIS_BOARD
 
   if (chassis_cmd_recv.chassis_mode ==
@@ -511,3 +542,5 @@ void ChassisTask() {
   CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
 #endif // CHASSIS_BOARD
 }
+
+#endif // defined(ONE_BOARD) || defined(CHASSIS_BOARD)

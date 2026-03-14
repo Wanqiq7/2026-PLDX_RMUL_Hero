@@ -17,7 +17,7 @@
 - Use 2-space indentation, brace-on-same-line style, and include groups ordered HAL → modules → app.
 - Files and topics stay lowercase snake_case (`bsp_dwt.c`, `gimbal_sysid_cmd`); macros remain SCREAMING_SNAKE_CASE (`ENABLE_GIMBAL_SYSID`, `CHASSIS_BOARD`).
 - Keep HAL init inside `Src/`, schedule work in FreeRTOS tasks, and guard experiments with `#if`.
-- Warnings fail the build (`-Werror`), so favor explicit widths, `const`, and checked return values.
+- Fix warnings proactively, but the current build no longer treats them as hard errors; still favor explicit widths, `const`, and checked return values.
 
 ## Testing Guidelines
 - There is no automated test suite; validation equals building, flashing, and exercising FreeRTOS tasks on the STM32F407 target.

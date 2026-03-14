@@ -52,8 +52,13 @@ void OSTaskInit() {
   osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 2048);
   robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
 
-  osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
-  uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
+  if (RefereeTaskIsReady()) {
+    osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
+    uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
+  } else {
+    uiTaskHandle = NULL;
+    LOGWARNING("[freeRTOS] UI Task skipped: referee not ready");
+  }
 
   osThreadDef(sysidtask, StartSYSIDTASK, osPriorityAboveNormal, 0, 512);
   sysidTaskHandle = osThreadCreate(osThread(sysidtask), NULL);
@@ -86,9 +91,9 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument) {
     MotorControlTask();
     motor_dt = DWT_GetTimeline_ms() - motor_start;
     // 500Hz：期望2ms内完成
-    if (motor_dt > 2)
+    if (motor_dt > 1)
       LOGERROR("[freeRTOS] MOTOR Task is being DELAY! dt = [%f]", &motor_dt);
-    osDelay(2);
+    osDelay(1);
   }
 }
 

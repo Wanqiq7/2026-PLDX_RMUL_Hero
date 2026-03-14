@@ -36,12 +36,6 @@ typedef enum {
   UI_FRICTION_ON,
 } ui_friction_mode_e;
 
-// 弹舱盖模式（UI显示用）
-typedef enum {
-  UI_LID_OPEN = 0,
-  UI_LID_CLOSE,
-} ui_lid_mode_e;
-
 // 功率数据（UI显示用）
 typedef struct {
   float chassis_power_mx;
@@ -76,8 +70,13 @@ typedef struct
 	ext_robot_hurt_t RobotHurt;							   // 0x0206
 	ext_shoot_data_t ShootData;							   // 0x0207
 
-	// 自定义交互数据的接收
-	Communicate_ReceiveData_t ReceiveData;
+	// 图传链路扩展命令接收缓存（仅协议层落地）
+	ext_map_interactive_data_var_t MapInteractiveData;
+	ext_custom_info_0310_var_t CustomInfo0310Data;
+	ext_custom_info_0311_var_t CustomInfo0311Data;
+	uint8_t MapInteractiveDataValid;
+	uint8_t CustomInfo0310Valid;
+	uint8_t CustomInfo0311Valid;
 
 	uint8_t init_flag;
 
@@ -89,7 +88,6 @@ typedef struct
 	uint32_t chassis_flag : 1;
 	uint32_t gimbal_flag : 1;
 	uint32_t shoot_flag : 1;
-	uint32_t lid_flag : 1;
 	uint32_t friction_flag : 1;
 	uint32_t Power_flag : 1;
 } Referee_Interactive_Flag_t;
@@ -103,7 +101,6 @@ typedef struct
 	ui_gimbal_mode_e gimbal_mode;				 // 云台模式
 	ui_shoot_mode_e shoot_mode;				 // 发射模式设置
 	ui_friction_mode_e friction_mode;			 // 摩擦轮关闭
-	ui_lid_mode_e lid_mode;					 // 弹舱盖打开
 	UI_Chassis_Power_Data_s Chassis_Power_Data; // 功率控制
 
 	// 上一次的模式，用于flag判断
@@ -111,7 +108,6 @@ typedef struct
 	ui_gimbal_mode_e gimbal_last_mode;
 	ui_shoot_mode_e shoot_last_mode;
 	ui_friction_mode_e friction_last_mode;
-	ui_lid_mode_e lid_last_mode;
 	UI_Chassis_Power_Data_s Chassis_last_Power_Data;
 
 } Referee_Interactive_info_t;
@@ -127,12 +123,51 @@ typedef struct
 referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle);
 
 /**
- * @brief UI绘制和交互数的发送接口,由UI绘制任务和多机通信函数调用
- * @note 内部包含了一个实时系统的延时函数,这是因为裁判系统接收CMD数据至高位10Hz
+ * @brief UI绘制和交互数据的发送接口，由UI绘制任务和多机通信函数调用
+ * @note 内部包含基础节流，当前按 2026 协议 0x0301 上行 30Hz 上限进行保守发送
  *
  * @param send 发送数据首地址
  * @param tx_len 发送长度
  */
 void RefereeSend(uint8_t *send, uint16_t tx_len);
+
+/**
+ * @brief 获取裁判系统在线状态
+ * @return 1在线, 0离线
+ */
+uint8_t RefereeIsOnline(void);
+
+/**
+ * @brief 推进裁判串口流式解析状态机
+ *
+ * @note 必须在任务上下文中周期调用,避免将复杂协议解析放回 UART ISR
+ */
+void RefereeProcess(void);
+
+/**
+ * @brief 尝试消费0x0309图传链路数据，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeMapInteractiveData(ext_map_interactive_data_var_t *out_data);
+
+/**
+ * @brief 尝试消费0x0310图传链路大包数据，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeCustomInfo0310(ext_custom_info_0310_var_t *out_data);
+
+/**
+ * @brief 尝试消费0x0311图传链路上行数据，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeCustomInfo0311(ext_custom_info_0311_var_t *out_data);
+
+/**
+ * @brief 清空扩展协议有效标志位
+ */
+void RefereeClearExtendedDataFlags(void);
 
 #endif // !REFEREE_H

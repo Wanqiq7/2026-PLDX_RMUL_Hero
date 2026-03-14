@@ -10,13 +10,16 @@
 #include "remote_control.h"
 #include "user_lib.h"
 #include "vision_comm.h"
+#include "vtm_input/vtm_input.h"
 
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
 
-#include "arm_math.h"
+#include "arm_math_compat.h"
+#include "main.h"
 #include <math.h>
+#include <string.h>
 
 #define DEG_TO_RAD 0.01745329251994329576f
 
@@ -54,6 +57,11 @@
       (angle_rad) = min_rad;                                                   \
   } while (0)
 
+// 键鼠功率档位（通过 chassis_speed_buff 透传给底盘功率控制）
+static const int CHASSIS_POWER_ECO_PERCENT = 80;        // 经济档：80%功率
+static const int CHASSIS_POWER_LIMIT_PERCENT = 100;     // 额定档：100%功率
+static const int CHASSIS_POWER_OVERDRIVE_PERCENT = 120; // 超功率档：120%功率
+
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
 #include "can_comm.h"
@@ -69,7 +77,8 @@ static Chassis_Ctrl_Cmd_s
 static Chassis_Upload_Data_s
     chassis_fetch_data; // 从底盘应用接收的反馈信息信息,底盘功率枪口热量与底盘运动状态等
 
-static RC_ctrl_t *rc_data; // 遥控器数据,初始化时返回
+static RC_ctrl_t *rc_data;               // 遥控器数据,初始化时返回
+static VTM_Input_Data_s *vtm_input_data; // 官方图传输入数据
 
 // 视觉控制消息(通过message center与vision应用通信)
 static Publisher_t *vision_cmd_pub;           // 视觉控制指令发布者
@@ -89,29 +98,581 @@ static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 
 static Robot_Status_e robot_state; // 机器人整体工作状态
 
+typedef enum {
+  CMD_INPUT_SOURCE_NONE = 0,
+  CMD_INPUT_SOURCE_RC,
+  CMD_INPUT_SOURCE_VTM,
+} Cmd_Input_Source_e;
+
+typedef struct {
+  struct {
+    int16_t rocker_l_;
+    int16_t rocker_l1;
+    int16_t rocker_r_;
+    int16_t rocker_r1;
+    uint8_t switch_left;
+    uint8_t switch_right;
+  } rc;
+  struct {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+    uint8_t press_l;
+    uint8_t press_r;
+    uint8_t press_m;
+  } mouse;
+  Key_t key[3];
+  uint8_t key_count[3][16];
+  uint8_t pause_pressed;
+  uint8_t trigger_pressed;
+  uint8_t online;
+  Cmd_Input_Source_e source;
+} Cmd_Input_Data_s;
+
+static Cmd_Input_Data_s cmd_input_active;
+static Cmd_Input_Source_e cmd_input_source = CMD_INPUT_SOURCE_NONE;
+
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 // 键盘控制
 static float keyboard_vx_cmd_planned = 0.0f;
 static float keyboard_vy_cmd_planned = 0.0f;
+static int keyboard_power_mode_selected = 100;
+static loader_mode_e keyboard_load_mode_selected = LOAD_STOP;
+static loader_mode_e ui_loader_mode_selected = LOAD_STOP;
+static uint8_t keyboard_rotate_mode_enabled = 0U; // 0: 键鼠跟随模式 1: 小陀螺
+
+// 失联降级状态机与门控参数
+typedef enum {
+  CMD_STATE_NORMAL = 0,
+  CMD_STATE_DEGRADED_VISION,
+  CMD_STATE_DEGRADED_REFEREE,
+  CMD_STATE_DEGRADED_LINK,
+} Cmd_Degrade_State_e;
+
+static Cmd_Degrade_State_e cmd_degrade_state = CMD_STATE_DEGRADED_LINK;
+static Cmd_Degrade_State_e cmd_degrade_candidate = CMD_STATE_DEGRADED_LINK;
+static uint32_t cmd_state_candidate_since_ms = 0;
+static uint32_t cmd_last_telemetry_ms = 0;
+static uint32_t cmd_last_can_warn_ms = 0;
+static uint32_t cmd_last_ff_update_ms = 0;
+static uint8_t cmd_force_safe_fire = 0;
+static float cmd_rest_heat_filtered = 0.0f;
+static float cmd_shoot_rate_ff = 1.0f;
+static uint8_t cmd_unlock_prev_safe_hold = 0U;
+static uint8_t cmd_ui_refresh_trigger_prev = 0U;
+typedef struct {
+  uint8_t online;
+  uint8_t capability;
+  uint8_t last_valid_mask;
+  uint8_t seq;
+  uint32_t last_update_ms;
+  float map_target_x;
+  float map_target_y;
+  uint8_t map_target_robot_id;
+  uint8_t map_cmd_keyboard;
+  uint8_t map_path_intention;
+  uint8_t map_custom_head0;
+  uint8_t map_custom_head1;
+  uint8_t map_custom_head2;
+  uint8_t map_custom_head3;
+} Regular_Bridge_State_s;
+static Regular_Bridge_State_s regular_bridge_state;
+
+static const uint32_t CMD_DEGRADE_ENTER_HOLD_MS = 80U;
+static const uint32_t CMD_DEGRADE_EXIT_HOLD_MS = 300U;
+static const uint32_t CMD_GATE_TELEMETRY_PERIOD_MS = 500U;
+static const uint32_t CMD_REGULAR_BRIDGE_STALE_MS = 400U;
+static const uint32_t CMD_FF_UPDATE_PERIOD_MS = 100U;
+static const float CMD_REST_HEAT_FUSION_ALPHA = 0.25f;
+static const float CMD_MIN_REST_HEAT_TO_FIRE = HEAT_PER_SHOT_D;
+static const float CMD_SAFE_SHOOT_RATE = SHOOT_RATE_SAFE;
+
+static uint8_t IsChassisLinkOnline(void) {
+#ifdef GIMBAL_BOARD
+  return (cmd_can_comm != NULL) ? CANCommIsOnline(cmd_can_comm) : 0U;
+#else
+  return 1U;
+#endif
+}
+
+static void ResetChassisFetchDataSafe(void) {
+  chassis_fetch_data.referee_online = 0;
+  chassis_fetch_data.current_hp = 0;
+  chassis_fetch_data.buffer_energy = 0;
+  chassis_fetch_data.rest_heat = 0;
+  chassis_fetch_data.bullet_speed = SHOOT_FIXED_BULLET_SPEED;
+  chassis_fetch_data.enemy_color = COLOR_NONE;
+  chassis_fetch_data.regular_online = 0;
+  chassis_fetch_data.robot_id = 0;
+  chassis_fetch_data.chassis_power_limit = 0;
+  chassis_fetch_data.barrel_heat = 0;
+  chassis_fetch_data.barrel_heat_limit = 0;
+  chassis_fetch_data.barrel_cooling_value = 0U;
+  chassis_fetch_data.bullet_speed_limit = 0.0f;
+  chassis_fetch_data.referee_ts_ms = 0;
+  chassis_fetch_data.regular_bridge_version = 0U;
+  chassis_fetch_data.regular_bridge_capability = 0U;
+  chassis_fetch_data.regular_cmd_valid_mask = 0U;
+  chassis_fetch_data.regular_cmd_seq = 0U;
+  chassis_fetch_data.map_target_x = 0.0f;
+  chassis_fetch_data.map_target_y = 0.0f;
+  chassis_fetch_data.map_target_robot_id = 0U;
+  chassis_fetch_data.map_cmd_keyboard = 0U;
+  chassis_fetch_data.map_hero_x = 0U;
+  chassis_fetch_data.map_hero_y = 0U;
+  chassis_fetch_data.map_sentry_x = 0U;
+  chassis_fetch_data.map_sentry_y = 0U;
+  chassis_fetch_data.map_path_intention = 0U;
+  chassis_fetch_data.map_custom_head0 = 0U;
+  chassis_fetch_data.map_custom_head1 = 0U;
+  chassis_fetch_data.map_custom_head2 = 0U;
+  chassis_fetch_data.map_custom_head3 = 0U;
+}
+
+static void ResetRegularBridgeState(void) {
+  memset(&regular_bridge_state, 0, sizeof(regular_bridge_state));
+}
+
+static void ResetCmdInputActive(void) {
+  memset(&cmd_input_active, 0, sizeof(cmd_input_active));
+  cmd_input_source = CMD_INPUT_SOURCE_NONE;
+}
+
+static void LoadCmdInputFromRC(Cmd_Input_Data_s *input_data) {
+  if (input_data == NULL) {
+    return;
+  }
+
+  memset(input_data, 0, sizeof(*input_data));
+  input_data->online = RemoteControlIsOnline() ? 1U : 0U;
+  input_data->source =
+      input_data->online ? CMD_INPUT_SOURCE_RC : CMD_INPUT_SOURCE_NONE;
+
+  if (!input_data->online || rc_data == NULL) {
+    return;
+  }
+
+  input_data->rc.rocker_l_ = rc_data[TEMP].rc.rocker_l_;
+  input_data->rc.rocker_l1 = rc_data[TEMP].rc.rocker_l1;
+  input_data->rc.rocker_r_ = rc_data[TEMP].rc.rocker_r_;
+  input_data->rc.rocker_r1 = rc_data[TEMP].rc.rocker_r1;
+  input_data->rc.switch_left = rc_data[TEMP].rc.switch_left;
+  input_data->rc.switch_right = rc_data[TEMP].rc.switch_right;
+  input_data->mouse.x = rc_data[TEMP].mouse.x;
+  input_data->mouse.y = rc_data[TEMP].mouse.y;
+  input_data->mouse.z = rc_data[TEMP].mouse.z;
+  input_data->mouse.press_l = rc_data[TEMP].mouse.press_l;
+  input_data->mouse.press_r = rc_data[TEMP].mouse.press_r;
+  memcpy(input_data->key, rc_data[TEMP].key, sizeof(input_data->key));
+  memcpy(input_data->key_count, rc_data[TEMP].key_count,
+         sizeof(input_data->key_count));
+}
+
+static void LoadCmdInputFromVTM(Cmd_Input_Data_s *input_data) {
+  if (input_data == NULL) {
+    return;
+  }
+
+  memset(input_data, 0, sizeof(*input_data));
+  input_data->online = VTMInputIsOnline() ? 1U : 0U;
+  input_data->source =
+      input_data->online ? CMD_INPUT_SOURCE_VTM : CMD_INPUT_SOURCE_NONE;
+
+  if (!input_data->online || vtm_input_data == NULL) {
+    return;
+  }
+
+  input_data->rc.rocker_l_ = vtm_input_data->rc.rocker_l_;
+  input_data->rc.rocker_l1 = vtm_input_data->rc.rocker_l1;
+  input_data->rc.rocker_r_ = vtm_input_data->rc.rocker_r_;
+  input_data->rc.rocker_r1 = vtm_input_data->rc.rocker_r1;
+  input_data->rc.switch_left = vtm_input_data->rc.switch_left;
+  input_data->rc.switch_right = vtm_input_data->rc.switch_right;
+  input_data->mouse.x = vtm_input_data->mouse.x;
+  input_data->mouse.y = vtm_input_data->mouse.y;
+  input_data->mouse.z = vtm_input_data->mouse.z;
+  input_data->mouse.press_l = vtm_input_data->mouse.press_l;
+  input_data->mouse.press_r = vtm_input_data->mouse.press_r;
+  input_data->mouse.press_m = vtm_input_data->mouse.press_m;
+  input_data->pause_pressed = vtm_input_data->rc.pause_pressed;
+  input_data->trigger_pressed = vtm_input_data->rc.trigger_pressed;
+  memcpy(input_data->key, vtm_input_data->key, sizeof(input_data->key));
+  memcpy(input_data->key_count, vtm_input_data->key_count,
+         sizeof(input_data->key_count));
+}
+
+static void SelectActiveControlInput(void) {
+  Cmd_Input_Data_s rc_input;
+  Cmd_Input_Data_s vtm_input;
+
+  LoadCmdInputFromRC(&rc_input);
+  LoadCmdInputFromVTM(&vtm_input);
+
+  if (vtm_input.online) {
+    cmd_input_active = vtm_input;
+  } else if (rc_input.online) {
+    cmd_input_active = rc_input;
+  } else {
+    ResetCmdInputActive();
+    return;
+  }
+
+  cmd_input_source = cmd_input_active.source;
+}
+
+static void UpdateRegularBridgeState(void) {
+  const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+  const uint8_t bridge_online =
+      (IsChassisLinkOnline() && chassis_fetch_data.regular_online &&
+       (chassis_fetch_data.regular_bridge_version == REGULAR_BRIDGE_VERSION))
+          ? 1U
+          : 0U;
+
+  regular_bridge_state.online = bridge_online;
+  if (!bridge_online) {
+    regular_bridge_state.last_valid_mask = 0U;
+    return;
+  }
+
+  regular_bridge_state.capability =
+      chassis_fetch_data.regular_bridge_capability;
+  regular_bridge_state.seq = chassis_fetch_data.regular_cmd_seq;
+  regular_bridge_state.last_valid_mask =
+      chassis_fetch_data.regular_cmd_valid_mask;
+
+  if (chassis_fetch_data.regular_cmd_valid_mask & REGULAR_BRIDGE_VALID_0303) {
+    regular_bridge_state.map_target_x = chassis_fetch_data.map_target_x;
+    regular_bridge_state.map_target_y = chassis_fetch_data.map_target_y;
+    regular_bridge_state.map_target_robot_id =
+        chassis_fetch_data.map_target_robot_id;
+    regular_bridge_state.map_cmd_keyboard = chassis_fetch_data.map_cmd_keyboard;
+    regular_bridge_state.last_update_ms = now_ms;
+  }
+  if (chassis_fetch_data.regular_cmd_valid_mask & REGULAR_BRIDGE_VALID_0307) {
+    regular_bridge_state.map_path_intention =
+        chassis_fetch_data.map_path_intention;
+    regular_bridge_state.last_update_ms = now_ms;
+  }
+  if (chassis_fetch_data.regular_cmd_valid_mask & REGULAR_BRIDGE_VALID_0308) {
+    regular_bridge_state.map_custom_head0 = chassis_fetch_data.map_custom_head0;
+    regular_bridge_state.map_custom_head1 = chassis_fetch_data.map_custom_head1;
+    regular_bridge_state.map_custom_head2 = chassis_fetch_data.map_custom_head2;
+    regular_bridge_state.map_custom_head3 = chassis_fetch_data.map_custom_head3;
+    regular_bridge_state.last_update_ms = now_ms;
+  }
+}
+
+static void UpdateVisionTrackingFlag(void) {
+  chassis_cmd_send.vision_is_tracking =
+      (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM &&
+       vision_data_recv.vision_takeover && vision_data_recv.target_locked)
+          ? 1U
+          : 0U;
+}
+
+static void UpdateUIRefreshRequest(void) {
+  const uint8_t trigger_pressed =
+      (cmd_input_source == CMD_INPUT_SOURCE_VTM && cmd_input_active.online)
+          ? (cmd_input_active.trigger_pressed ? 1U : 0U)
+          : 0U;
+
+  if (trigger_pressed && !cmd_ui_refresh_trigger_prev) {
+    chassis_cmd_send.ui_refresh_request_seq++;
+    LOGINFO("[cmd] VTM trigger edge, request UI refresh seq=%u",
+            (unsigned int)chassis_cmd_send.ui_refresh_request_seq);
+  }
+
+  cmd_ui_refresh_trigger_prev = trigger_pressed;
+}
+
+static uint8_t IsShootLoadFireIntent(loader_mode_e load_mode) {
+  return (load_mode == LOAD_1_BULLET || load_mode == LOAD_3_BULLET ||
+          load_mode == LOAD_BURSTFIRE)
+             ? 1U
+             : 0U;
+}
+
+static void UpdateShootRateFeedforward100ms(void) {
+  const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+  const uint8_t link_online = IsChassisLinkOnline();
+  const uint8_t referee_online =
+      (link_online && chassis_fetch_data.referee_online) ? 1U : 0U;
+
+  if (cmd_last_ff_update_ms == 0U ||
+      (now_ms - cmd_last_ff_update_ms) >= CMD_FF_UPDATE_PERIOD_MS) {
+    cmd_last_ff_update_ms = now_ms;
+
+    if (referee_online) {
+      float m = (float)chassis_fetch_data.rest_heat;
+      if (m <= 0.0f && chassis_fetch_data.barrel_heat_limit >
+                           chassis_fetch_data.barrel_heat) {
+        m = (float)(chassis_fetch_data.barrel_heat_limit -
+                    chassis_fetch_data.barrel_heat);
+      }
+
+      const float a = (float)chassis_fetch_data.barrel_cooling_value;
+      // c_ff=(10m-a)/(d*n)+a/d，其中 n=10*t_target
+      const float n = 10.0f * FEEDFORWARD_T_TARGET_S;
+      const float denominator = HEAT_PER_SHOT_D * n;
+
+      if (denominator > 0.0f) {
+        const float c_ff =
+            ((10.0f * m - a) / denominator) + (a / HEAT_PER_SHOT_D);
+        if (isfinite(c_ff)) {
+          cmd_shoot_rate_ff =
+              float_constrain(c_ff, SHOOT_RATE_MIN, SHOOT_RATE_MAX);
+        } else {
+          cmd_shoot_rate_ff = CMD_SAFE_SHOOT_RATE;
+        }
+      } else {
+        cmd_shoot_rate_ff = CMD_SAFE_SHOOT_RATE;
+      }
+    } else {
+      cmd_shoot_rate_ff = CMD_SAFE_SHOOT_RATE;
+    }
+  }
+
+  shoot_cmd_send.shoot_rate = cmd_shoot_rate_ff;
+}
+
+static void UpdateAutoFireGate(void) {
+  const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+  const uint8_t link_online = IsChassisLinkOnline();
+  const uint8_t referee_online =
+      (link_online && chassis_fetch_data.referee_online) ? 1U : 0U;
+  const uint8_t vision_online = VisionIsOnline() ? 1U : 0U;
+  const uint8_t autoaim_mode =
+      (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM) ? 1U : 0U;
+  const uint8_t bridge_cmd_fresh =
+      (regular_bridge_state.online &&
+       regular_bridge_state.last_update_ms > 0U &&
+       ((now_ms - regular_bridge_state.last_update_ms) <=
+        CMD_REGULAR_BRIDGE_STALE_MS))
+          ? 1U
+          : 0U;
+
+  if (referee_online) {
+    float referee_rest_heat = (float)chassis_fetch_data.rest_heat;
+    cmd_rest_heat_filtered += CMD_REST_HEAT_FUSION_ALPHA *
+                              (referee_rest_heat - cmd_rest_heat_filtered);
+  } else {
+    cmd_rest_heat_filtered *= 0.95f;
+  }
+  cmd_rest_heat_filtered =
+      float_constrain(cmd_rest_heat_filtered, 0.0f, 255.0f);
+
+  Cmd_Degrade_State_e next_candidate = CMD_STATE_NORMAL;
+  if (!link_online) {
+    next_candidate = CMD_STATE_DEGRADED_LINK;
+  } else if (!referee_online) {
+    next_candidate = CMD_STATE_DEGRADED_REFEREE;
+  } else if (autoaim_mode && !vision_online) {
+    next_candidate = CMD_STATE_DEGRADED_VISION;
+  }
+
+  if (next_candidate != cmd_degrade_candidate) {
+    cmd_degrade_candidate = next_candidate;
+    cmd_state_candidate_since_ms = now_ms;
+  }
+
+  uint32_t hold_ms = (cmd_degrade_candidate == CMD_STATE_NORMAL)
+                         ? CMD_DEGRADE_EXIT_HOLD_MS
+                         : CMD_DEGRADE_ENTER_HOLD_MS;
+  if (cmd_degrade_state != cmd_degrade_candidate &&
+      (now_ms - cmd_state_candidate_since_ms) >= hold_ms) {
+    cmd_degrade_state = cmd_degrade_candidate;
+  }
+
+  cmd_force_safe_fire = (cmd_degrade_state == CMD_STATE_NORMAL) ? 0U : 1U;
+
+  (void)referee_online;
+  shoot_cmd_send.bullet_speed = SHOOT_FIXED_BULLET_SPEED;
+  shoot_cmd_send.rest_heat = (uint8_t)cmd_rest_heat_filtered;
+
+  uint8_t operator_auto_fire_request =
+      (autoaim_mode && vision_cmd_send.allow_auto_fire) ? 1U : 0U;
+  uint8_t bridge_target_ok = 1U;
+  if (bridge_cmd_fresh &&
+      (regular_bridge_state.capability & REGULAR_BRIDGE_CAP_0303)) {
+    // 仅在桥接命令新鲜可用时追加目标有效性门控，无数据时不打断原流程
+    bridge_target_ok =
+        (regular_bridge_state.map_target_robot_id != 0U) ? 1U : 0U;
+  }
+  const float gate_rest_heat = referee_online
+                                   ? (float)chassis_fetch_data.rest_heat
+                                   : cmd_rest_heat_filtered;
+  uint8_t heat_ok = (gate_rest_heat >= CMD_MIN_REST_HEAT_TO_FIRE) ? 1U : 0U;
+  uint8_t manual_fire_request = IsShootLoadFireIntent(shoot_cmd_send.load_mode);
+  uint8_t manual_fire_ok =
+      (manual_fire_request && referee_online && link_online && heat_ok &&
+       !cmd_force_safe_fire)
+          ? 1U
+          : 0U;
+  uint8_t auto_fire_ok =
+      (operator_auto_fire_request && vision_data_recv.vision_valid &&
+       vision_data_recv.target_locked && vision_data_recv.vision_takeover &&
+       referee_online && link_online && heat_ok && bridge_target_ok &&
+       !cmd_force_safe_fire)
+          ? 1U
+          : 0U;
+
+  if (cmd_force_safe_fire) {
+    vision_cmd_send.allow_auto_fire = 0U;
+    shoot_cmd_send.shoot_rate = CMD_SAFE_SHOOT_RATE;
+    if (autoaim_mode) {
+      shoot_cmd_send.load_mode = LOAD_STOP;
+    }
+  } else {
+    vision_cmd_send.allow_auto_fire = auto_fire_ok;
+    if (autoaim_mode && !auto_fire_ok) {
+      shoot_cmd_send.load_mode = LOAD_STOP;
+    }
+  }
+
+  if (manual_fire_request && !manual_fire_ok) {
+    shoot_cmd_send.load_mode = LOAD_STOP;
+  }
+
+  if ((now_ms - cmd_last_telemetry_ms) >= CMD_GATE_TELEMETRY_PERIOD_MS) {
+    LOGINFO("[cmd-gate] state=%d link=%u referee=%u vision=%u auto=%u "
+            "heat_f=%.1f heat_raw=%u track=%u bridge=%u bmask=0x%02X tgt=%u",
+            (int)cmd_degrade_state, link_online, referee_online, vision_online,
+            vision_cmd_send.allow_auto_fire, cmd_rest_heat_filtered,
+            chassis_fetch_data.rest_heat, chassis_cmd_send.vision_is_tracking,
+            bridge_cmd_fresh, regular_bridge_state.last_valid_mask,
+            regular_bridge_state.map_target_robot_id);
+    cmd_last_telemetry_ms = now_ms;
+  }
+}
+
+static void ApplyRobotStopOutputs(void) {
+  robot_state = ROBOT_STOP;
+  cmd_force_safe_fire = 1U;
+
+  gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+  gimbal_cmd_send.vision_yaw_direct = 0;
+  gimbal_cmd_send.vision_pitch_direct = 0;
+  gimbal_cmd_send.vision_yaw_current = 0.0f;
+  gimbal_cmd_send.vision_pitch_ref = 0.0f;
+
+  chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+  chassis_cmd_send.vx = 0.0f;
+  chassis_cmd_send.vy = 0.0f;
+  chassis_cmd_send.wz = 0.0f;
+  chassis_cmd_send.offset_angle = 0.0f;
+  chassis_cmd_send.near_center_error = 0.0f;
+  chassis_cmd_send.vision_is_tracking = 0U;
+  chassis_cmd_send.image_auto_fire_request = 0U;
+  chassis_cmd_send.image_should_fire = 0U;
+  chassis_cmd_send.ui_friction_on = 0U;
+  chassis_cmd_send.ui_autoaim_enabled = 0U;
+  chassis_cmd_send.ui_fire_allow = 0U;
+  chassis_cmd_send.ui_stuck_active = 0U;
+  chassis_cmd_send.ui_loader_mode = (uint8_t)LOAD_STOP;
+
+  shoot_cmd_send.shoot_mode = SHOOT_OFF;
+  shoot_cmd_send.friction_mode = FRICTION_OFF;
+  shoot_cmd_send.load_mode = LOAD_STOP;
+  shoot_cmd_send.shoot_rate = CMD_SAFE_SHOOT_RATE;
+
+  vision_cmd_send.vision_mode = VISION_MODE_OFF;
+  vision_cmd_send.allow_auto_fire = 0U;
+}
+
+static void UpdateRobotSafetyState(void) {
+  uint8_t safe_hold_active = 0U;
+  const uint8_t input_online = cmd_input_active.online;
+  uint8_t unlock_edge = 0U;
+
+  if (cmd_input_source == CMD_INPUT_SOURCE_VTM) {
+    safe_hold_active = cmd_input_active.pause_pressed ? 1U : 0U;
+  }
+
+  unlock_edge = (cmd_unlock_prev_safe_hold && !safe_hold_active) ? 1U : 0U;
+
+  if (!input_online) {
+    if (robot_state != ROBOT_STOP) {
+      LOGWARNING("[CMD] control input offline, force robot to STOP.");
+    }
+    robot_state = ROBOT_STOP;
+  } else if (safe_hold_active) {
+    if (robot_state != ROBOT_STOP) {
+      LOGWARNING("[CMD] safe hold active, force robot to STOP.");
+    }
+    robot_state = ROBOT_STOP;
+  } else if (robot_state != ROBOT_READY) {
+    robot_state = ROBOT_READY;
+    if (unlock_edge) {
+      LOGINFO("[CMD] Unlock edge detected, robot enters READY.");
+    } else {
+      LOGINFO("[CMD] Control input online, robot enters READY.");
+    }
+  }
+
+  cmd_unlock_prev_safe_hold = safe_hold_active;
+}
+
+static void PublishImageTelemetrySummary(void) {
+  chassis_cmd_send.vision_is_tracking =
+      (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM &&
+       vision_data_recv.vision_takeover && vision_data_recv.target_locked)
+          ? 1U
+          : 0U;
+  chassis_cmd_send.image_online = VTMInputIsOnline() ? 1U : 0U;
+  chassis_cmd_send.image_target_locked =
+      vision_data_recv.target_locked ? 1U : 0U;
+  chassis_cmd_send.image_auto_fire_request =
+      (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM &&
+       vision_cmd_send.allow_auto_fire)
+          ? 1U
+          : 0U;
+  chassis_cmd_send.image_should_fire = vision_data_recv.should_fire ? 1U : 0U;
+  chassis_cmd_send.ui_friction_on =
+      (shoot_cmd_send.friction_mode == FRICTION_ON) ? 1U : 0U;
+  chassis_cmd_send.ui_autoaim_enabled =
+      (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM) ? 1U : 0U;
+  chassis_cmd_send.ui_fire_allow =
+      (shoot_cmd_send.shoot_mode == SHOOT_ON &&
+       shoot_cmd_send.friction_mode == FRICTION_ON &&
+       !cmd_force_safe_fire &&
+       ((float)shoot_cmd_send.rest_heat >= CMD_MIN_REST_HEAT_TO_FIRE) &&
+       (shoot_fetch_data.loader_jam_state == 0U))
+          ? 1U
+          : 0U;
+  // UI 跨板通道仅传最小摘要：卡弹流程状态 + 发射模式。
+  // 热量预测/融合值只保留在云台控制层使用，不进入底盘 UI 显示链。
+  chassis_cmd_send.ui_stuck_active =
+      (shoot_fetch_data.loader_jam_state != 0U) ? 1U : 0U;
+  chassis_cmd_send.ui_loader_mode = (uint8_t)ui_loader_mode_selected;
+  chassis_cmd_send.image_cmd_seq++;
+  chassis_cmd_send.image_ts_ms = (uint32_t)DWT_GetTimeline_ms();
+}
+
 void RobotCMDInit() {
   rc_data = RemoteControlInit(
       &huart3); // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+  vtm_input_data = VTMInputInit(&huart6);
 
   // 注意: 视觉CAN通信初始化已移至 VisionAppInit() (vision.c)
 
   // 视觉控制消息注册
   vision_cmd_pub = RegisterPublisher("vision_cmd", sizeof(Vision_Ctrl_Cmd_s));
-  vision_data_sub = RegisterSubscriber("vision_data", sizeof(Vision_Upload_Data_s));
+  vision_data_sub =
+      RegisterSubscriber("vision_data", sizeof(Vision_Upload_Data_s));
 
   gimbal_cmd_pub = RegisterPublisher("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
-  gimbal_feed_sub = RegisterSubscriber("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
+  gimbal_feed_sub =
+      RegisterSubscriber("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
   shoot_cmd_pub = RegisterPublisher("shoot_cmd", sizeof(Shoot_Ctrl_Cmd_s));
-  shoot_feed_sub = RegisterSubscriber("shoot_feed", sizeof(Shoot_Upload_Data_s));
+  shoot_feed_sub =
+      RegisterSubscriber("shoot_feed", sizeof(Shoot_Upload_Data_s));
 
 #ifdef ONE_BOARD // 双板兼容
-  chassis_cmd_pub = RegisterPublisher("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-  chassis_feed_sub = RegisterSubscriber("chassis_feed", sizeof(Chassis_Upload_Data_s));
+  chassis_cmd_pub =
+      RegisterPublisher("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
+  chassis_feed_sub =
+      RegisterSubscriber("chassis_feed", sizeof(Chassis_Upload_Data_s));
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
   CANComm_Init_Config_s comm_conf = {
@@ -125,17 +686,18 @@ void RobotCMDInit() {
       .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
   };
   cmd_can_comm = CANCommInit(&comm_conf);
-#endif                          // GIMBAL_BOARD
+#endif // GIMBAL_BOARD
+
   gimbal_cmd_send.yaw = 0.0f;   // Yaw初始化为0弧度
   gimbal_cmd_send.pitch = 0.0f; // Pitch初始化为0弧度
 
   // 初始化发射模块控制指令
-  shoot_cmd_send.shoot_mode = SHOOT_ON;        // 发射模块使能
-  shoot_cmd_send.friction_mode = FRICTION_OFF; // 摩擦轮默认关闭
-  shoot_cmd_send.load_mode = LOAD_STOP;        // 拨盘默认停止
-  shoot_cmd_send.bullet_speed = SMALL_AMU_15;  // 默认弹速（会被switch覆盖）
-  shoot_cmd_send.shoot_rate = 1.0f;            // 默认射频1发/秒（英雄用）
-  shoot_cmd_send.lid_mode = LID_CLOSE;         // 默认弹舱盖关闭
+  shoot_cmd_send.shoot_mode = SHOOT_OFF;                  // 默认安全停射
+  shoot_cmd_send.friction_mode = FRICTION_OFF;            // 摩擦轮默认关闭
+  shoot_cmd_send.load_mode = LOAD_STOP;                   // 拨盘默认停止
+  shoot_cmd_send.bullet_speed = SHOOT_FIXED_BULLET_SPEED; // 固定弹速 12m/s
+  shoot_cmd_send.shoot_rate = SHOOT_RATE_SAFE;            // 默认安全射频
+  shoot_cmd_send.rest_heat = 0U;
 
   // 初始化视觉控制指令
   vision_cmd_send.vision_mode = VISION_MODE_OFF; // 默认关闭视觉控制
@@ -143,8 +705,43 @@ void RobotCMDInit() {
   vision_cmd_send.manual_yaw_offset = 0.0f;      // 无手动微调
   vision_cmd_send.manual_pitch_offset = 0.0f;
 
-  robot_state =
-      ROBOT_READY; // 启动时机器人进入工作模式,后续加入所有应用初始化完成之后再进入
+  // 初始化底盘回传摘要
+  chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
+  chassis_cmd_send.vision_is_tracking = 0;
+  chassis_cmd_send.image_online = 0;
+  chassis_cmd_send.image_target_locked = 0;
+  chassis_cmd_send.image_auto_fire_request = 0;
+  chassis_cmd_send.image_should_fire = 0;
+  chassis_cmd_send.image_cmd_seq = 0;
+  chassis_cmd_send.image_ts_ms = 0;
+  chassis_cmd_send.ui_friction_on = 0;
+  chassis_cmd_send.ui_autoaim_enabled = 0;
+  chassis_cmd_send.ui_fire_allow = 0;
+  chassis_cmd_send.ui_stuck_active = 0;
+  chassis_cmd_send.ui_loader_mode = (uint8_t)LOAD_STOP;
+  chassis_cmd_send.ui_refresh_request_seq = 0U;
+  ResetChassisFetchDataSafe();
+  ResetRegularBridgeState();
+
+  cmd_degrade_state = CMD_STATE_DEGRADED_LINK;
+  cmd_degrade_candidate = CMD_STATE_DEGRADED_LINK;
+  cmd_state_candidate_since_ms = (uint32_t)DWT_GetTimeline_ms();
+  cmd_last_telemetry_ms = 0;
+  cmd_last_ff_update_ms = 0;
+  cmd_last_can_warn_ms = 0;
+  cmd_force_safe_fire = 1U;
+  cmd_rest_heat_filtered = 0.0f;
+  cmd_shoot_rate_ff = CMD_SAFE_SHOOT_RATE;
+  cmd_unlock_prev_safe_hold = 0U;
+  cmd_ui_refresh_trigger_prev = 0U;
+  keyboard_power_mode_selected = CHASSIS_POWER_LIMIT_PERCENT;
+  keyboard_load_mode_selected = LOAD_STOP;
+  ui_loader_mode_selected = LOAD_STOP;
+  keyboard_rotate_mode_enabled = 0U;
+  ResetCmdInputActive();
+
+  robot_state = ROBOT_STOP; // 上电默认安全停机，必须执行显式解锁动作
+  ApplyRobotStopOutputs();
 }
 
 /**
@@ -227,21 +824,23 @@ static void CalcGimbalChassisAngle(void) {
  *
  */
 static void RemoteControlSet() {
+  // 遥控器模式固定为额定功率档，避免与键鼠档位残留互相干扰
+  chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
   // 左侧开关状态为[中],底盘跟随云台
-  if (switch_is_mid(rc_data[TEMP].rc.switch_left)) {
+  if (switch_is_mid(cmd_input_active.rc.switch_left)) {
     chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
     gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     // gimbal_cmd_send.gimbal_mode = GIMBAL_SYS_ID_CHIRP; #系统辨识开关
   }
   // 左侧开关状态为[下],或视觉未识别到目标,纯遥控器拨杆控制
   else if (switch_is_down(
-               rc_data[TEMP].rc.switch_left)) // 纯遥控器：底盘不跟随云台
+               cmd_input_active.rc.switch_left)) // 纯遥控器：底盘不跟随云台
   {
     chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW; // 允许全向移动，wz=0
-    gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+    gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
   }
   // 左侧开关状态为[上],底盘小陀螺
-  else if (switch_is_up(rc_data[TEMP].rc.switch_left)) {
+  else if (switch_is_up(cmd_input_active.rc.switch_left)) {
     chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
     gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
   }
@@ -249,8 +848,8 @@ static void RemoteControlSet() {
   static float vx_filtered = 0.0f;
   static float vy_filtered = 0.0f;
 
-  float vy_norm = (float)rc_data[TEMP].rc.rocker_l1 / 660.0f;
-  float vx_norm = (float)rc_data[TEMP].rc.rocker_l_ / 660.0f;
+  float vy_norm = (float)cmd_input_active.rc.rocker_l1 / 660.0f;
+  float vx_norm = (float)cmd_input_active.rc.rocker_l_ / 660.0f;
 
   vx_filtered = LowPassFilter_Float(vx_norm, 0.90f, &vx_filtered);
   vy_filtered = LowPassFilter_Float(vy_norm, 0.90f, &vy_filtered);
@@ -263,8 +862,8 @@ static void RemoteControlSet() {
   static float pitch_increment_filtered = 0.0f; // 保存上一次的滤波输出
 
   // 计算原始增量，右摇杆归一化到 [-1, 1]
-  float yaw_norm = (float)rc_data[TEMP].rc.rocker_r_ / 660.0f; // 转为弧度
-  float pitch_norm = (float)rc_data[TEMP].rc.rocker_r1 / 660.0f;
+  float yaw_norm = (float)cmd_input_active.rc.rocker_r_ / 660.0f; // 转为弧度
+  float pitch_norm = (float)cmd_input_active.rc.rocker_r1 / 660.0f;
 
   // 角度增量：Yaw 转弧度，Pitch 保持角度制，后续增益由使用者调整
   float yaw_increment = yaw_norm / 180.0f * M_PI; // 相当于 1° 的弧度
@@ -283,59 +882,66 @@ static void RemoteControlSet() {
 
   // 发射参数 + 视觉模式联动
   // 右侧开关控制发射机构 + 视觉模式 - 三档互斥逻辑
-  // [下档]: 全部停止（摩擦轮停止，拨盘停止，视觉关闭）
-  // [中档]: 仅摩擦轮转动（摩擦轮开启，拨盘停止，视觉关闭）
-  // [上档]: 自瞄模式（摩擦轮开启，单发，自瞄启用，允许自动射击）
-  if (switch_is_down(rc_data[TEMP].rc.switch_right)) {
-    // 下档：全部停止
+  // [下档]: 正常遥控云台，摩擦轮关闭
+  // [中档]: 正常遥控云台，摩擦轮开启
+  // [上档]: 切换到键鼠控制（在 RobotCMDTask 中分流）
+  if (switch_is_down(cmd_input_active.rc.switch_right)) {
+    // 下档：正常遥控云台，关闭摩擦轮
     shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
     vision_cmd_send.vision_mode = VISION_MODE_OFF; // 关闭视觉
     vision_cmd_send.allow_auto_fire = 0;
-  } else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) {
-    // 中档：仅摩擦轮转动
+    ui_loader_mode_selected = LOAD_STOP;
+  } else if (switch_is_mid(cmd_input_active.rc.switch_right)) {
+    // 中档：正常遥控云台，开启摩擦轮
     shoot_cmd_send.friction_mode = FRICTION_ON;
     shoot_cmd_send.load_mode = LOAD_STOP;
     vision_cmd_send.vision_mode = VISION_MODE_OFF; // 关闭视觉
     vision_cmd_send.allow_auto_fire = 0;
-  } else if (switch_is_up(rc_data[TEMP].rc.switch_right)) {
-    // 上档：自瞄模式（英雄机器人标准配置）
-    shoot_cmd_send.friction_mode = FRICTION_ON;
-    // 自瞄下默认不主动拨弹：由视觉 should_fire 决定是否触发发射
+    ui_loader_mode_selected = LOAD_STOP;
+  } else {
+    // RobotCMDTask 已保证右拨杆上档走键鼠路径，这里对异常值保守降级为下档。
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
     shoot_cmd_send.load_mode = LOAD_STOP;
-    shoot_cmd_send.shoot_rate = 1.0f; // 1Hz射频（每秒1发，不应期1000ms）
-    // 启用自瞄：视觉无目标时允许遥控器操控云台（由 gimbal 层接管/仲裁）
-    vision_cmd_send.vision_mode = VISION_MODE_AUTO_AIM;
-    vision_cmd_send.allow_auto_fire = 1;
-
-    // 自瞄时切到独立自瞄模式（Yaw 视觉双环 / Pitch MIT位置刚度）
-    // 视觉无目标时云台仍由遥控器/鼠标控制（接管仲裁在 gimbal 层实现）
-    gimbal_cmd_send.gimbal_mode = GIMBAL_AUTOAIM_MODE;
+    vision_cmd_send.vision_mode = VISION_MODE_OFF; // 关闭视觉
+    vision_cmd_send.allow_auto_fire = 0;
+    ui_loader_mode_selected = LOAD_STOP;
   }
 }
 
-/**
- * @brief 视觉数据融合，当视觉有效时覆盖云台和发射控制
- *
- */
-/**
- * @brief 输入为键鼠时模式和控制量设置
- *
- */
 static void MouseKeySet() {
   float target_vx, target_vy;
-  float dt = 0.005f; // 5ms
+  static uint32_t keyboard_ramp_dwt_cnt = 0U;
+  static uint8_t keyboard_ramp_dt_synced = 0U;
+  float dt = 0.0f;
+
+  /* 键鼠斜坡规划使用真实控制周期，避免手写固定dt导致参数与实际调度失配。
+   * 首次调用只同步时间戳，不使用异常大的首帧dt。
+   * 同时对dt做上下限保护，避免断点/卡顿后一次性跳变过大。 */
+  if (!keyboard_ramp_dt_synced) {
+    DWT_GetDeltaT(&keyboard_ramp_dwt_cnt);
+    keyboard_ramp_dt_synced = 1U;
+    dt = 0.005f;
+  } else {
+    dt = DWT_GetDeltaT(&keyboard_ramp_dwt_cnt);
+    dt = float_constrain(dt, 0.001f, 0.02f);
+  }
 
   // 添加底盘键盘控制滤波静态变量
   static float vx_kb_filtered = 0.0f;
   static float vy_kb_filtered = 0.0f;
 
-  // 系数待测
-  target_vx =
-      rc_data[TEMP].key[KEY_PRESS].w * CHASSIS_KB_MAX_SPEED_X -
-      rc_data[TEMP].key[KEY_PRESS].s * CHASSIS_KB_MAX_SPEED_X; // 系数待测
-  target_vy = rc_data[TEMP].key[KEY_PRESS].s * CHASSIS_KB_MAX_SPEED_Y -
-              rc_data[TEMP].key[KEY_PRESS].d * CHASSIS_KB_MAX_SPEED_Y;
+  // 键鼠模式下发送给底盘的 vx/vy 必须与遥控器模式保持同一量纲：归一化到 [-1, 1]
+  // 后续由 Chassis 侧统一乘以 max_linear_speed 转换为实际速度
+  /* 当前底盘坐标语义下:
+   * vx 对应左右平移，vy 对应前后运动。
+   * 因此键盘映射需要与常见 WASD 语义对齐：
+   * W/S -> 前进/后退 -> vy 正/负
+   * A/D -> 左移/右移 -> vx 负/正 */
+  target_vx = (float)cmd_input_active.key[KEY_PRESS].d -
+              (float)cmd_input_active.key[KEY_PRESS].a;
+  target_vy = (float)cmd_input_active.key[KEY_PRESS].w -
+              (float)cmd_input_active.key[KEY_PRESS].s;
 
   // ✅ 为键盘控制添加低通滤波（α=0.8，截止频率约62Hz）
   // 原因：键盘输入是阶跃信号，需要滤波避免突变
@@ -357,9 +963,9 @@ static void MouseKeySet() {
 
   // 计算原始鼠标增量
   // Yaw: 角度 → 弧度（LQR需要弧度制）
-  float raw_mouse_yaw = (float)rc_data[TEMP].mouse.x / 660.0f;
+  float raw_mouse_yaw = (float)cmd_input_active.mouse.x / 660.0f;
   // Pitch: 鼠标输入同样归一化为弧度刻度
-  float raw_mouse_pitch = (float)rc_data[TEMP].mouse.y / 660.0f;
+  float raw_mouse_pitch = (float)cmd_input_active.mouse.y / 660.0f;
 
   // ✅ 为鼠标控制添加低通滤波
   // 鼠标DPI通常在400-1600之间，会产生高频噪声，需要滤波
@@ -372,45 +978,32 @@ static void MouseKeySet() {
 
   gimbal_cmd_send.yaw += mouse_yaw_increment;
   gimbal_cmd_send.pitch += mouse_pitch_increment;
-  LIMIT_PITCH_RAD(gimbal_cmd_send.pitch); // 添加pitch角度限位保护
+  LIMIT_PITCH_RAD(gimbal_cmd_send.pitch); // Pitch 角度限位
 
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_Z] % 3) // Z键设置弹速
-  {
-  case 0:
-    shoot_cmd_send.bullet_speed = 15;
-    break;
-  case 1:
-    shoot_cmd_send.bullet_speed = 18;
-    break;
-  default:
-    shoot_cmd_send.bullet_speed = 30;
-    break;
+  // 键鼠路径固定使用单一 12m/s 弹速，不再通过键位切换档位
+  shoot_cmd_send.bullet_speed = SHOOT_FIXED_BULLET_SPEED;
+  // 发射模式改为直达选择：
+  // Z = 1_BULLET, X = 3_BULLET, C = BURSTFIRE
+  // 采用“按一下锁定当前模式”的语义，避免循环切换导致误操作。
+  static uint8_t load_key_count_z_last = 0U;
+  static uint8_t load_key_count_x_last = 0U;
+  static uint8_t load_key_count_c_last = 0U;
+  if (cmd_input_active.key_count[KEY_PRESS][Key_Z] != load_key_count_z_last) {
+    keyboard_load_mode_selected = LOAD_1_BULLET;
+    load_key_count_z_last = cmd_input_active.key_count[KEY_PRESS][Key_Z];
   }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_E] % 4) // E键设置发射模式
-  {
-  case 0:
-    shoot_cmd_send.load_mode = LOAD_STOP;
-    break;
-  case 1:
-    shoot_cmd_send.load_mode = LOAD_1_BULLET;
-    break;
-  case 2:
-    shoot_cmd_send.load_mode = LOAD_3_BULLET;
-    break;
-  default:
-    shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
-    break;
+  if (cmd_input_active.key_count[KEY_PRESS][Key_X] != load_key_count_x_last) {
+    keyboard_load_mode_selected = LOAD_3_BULLET;
+    load_key_count_x_last = cmd_input_active.key_count[KEY_PRESS][Key_X];
   }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_R] % 2) // R键开关弹舱
-  {
-  case 0:
-    shoot_cmd_send.lid_mode = LID_OPEN;
-    break;
-  default:
-    shoot_cmd_send.lid_mode = LID_CLOSE;
-    break;
+  if (cmd_input_active.key_count[KEY_PRESS][Key_C] != load_key_count_c_last) {
+    keyboard_load_mode_selected = LOAD_BURSTFIRE;
+    load_key_count_c_last = cmd_input_active.key_count[KEY_PRESS][Key_C];
   }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_F] % 2) // F键开关摩擦轮
+  ui_loader_mode_selected = keyboard_load_mode_selected;
+  // Z/X/C 仅用于选择左键发射模式，不应在切换时立即触发拨弹。
+  shoot_cmd_send.load_mode = LOAD_STOP;
+  switch (cmd_input_active.key_count[KEY_PRESS][Key_E] % 2) // E键开关摩擦轮
   {
   case 0:
     shoot_cmd_send.friction_mode = FRICTION_OFF;
@@ -419,23 +1012,67 @@ static void MouseKeySet() {
     shoot_cmd_send.friction_mode = FRICTION_ON;
     break;
   }
-  switch (rc_data[TEMP].key_count[KEY_PRESS][Key_C] % 4) // C键设置底盘速度
-  {
-  case 0:
-    chassis_cmd_send.chassis_speed_buff = 40;
-    break;
-  case 1:
-    chassis_cmd_send.chassis_speed_buff = 60;
-    break;
-  case 2:
-    chassis_cmd_send.chassis_speed_buff = 80;
-    break;
-  default:
-    chassis_cmd_send.chassis_speed_buff = 100;
-    break;
+  // 键鼠模式功率档改为直达选择：
+  // R = 上档(120%), F = 中档(100%), V = 下档(80%)
+  // 采用“按一下锁定当前档位”的语义，避免循环切换导致误操作。
+  static uint8_t power_key_count_r_last = 0U;
+  static uint8_t power_key_count_f_last = 0U;
+  static uint8_t power_key_count_v_last = 0U;
+  if (cmd_input_active.key_count[KEY_PRESS][Key_R] != power_key_count_r_last) {
+    keyboard_power_mode_selected = CHASSIS_POWER_OVERDRIVE_PERCENT;
+    power_key_count_r_last = cmd_input_active.key_count[KEY_PRESS][Key_R];
   }
-  switch (rc_data[TEMP]
-              .key[KEY_PRESS]
+  if (cmd_input_active.key_count[KEY_PRESS][Key_F] != power_key_count_f_last) {
+    keyboard_power_mode_selected = CHASSIS_POWER_LIMIT_PERCENT;
+    power_key_count_f_last = cmd_input_active.key_count[KEY_PRESS][Key_F];
+  }
+  if (cmd_input_active.key_count[KEY_PRESS][Key_V] != power_key_count_v_last) {
+    keyboard_power_mode_selected = CHASSIS_POWER_ECO_PERCENT;
+    power_key_count_v_last = cmd_input_active.key_count[KEY_PRESS][Key_V];
+  }
+  chassis_cmd_send.chassis_speed_buff = keyboard_power_mode_selected;
+
+  // G 键切换小陀螺开关，采用“按一下切换一次”的锁存语义。
+  static uint8_t rotate_key_count_g_last = 0U;
+  if (cmd_input_active.key_count[KEY_PRESS][Key_G] != rotate_key_count_g_last) {
+    keyboard_rotate_mode_enabled = keyboard_rotate_mode_enabled ? 0U : 1U;
+    rotate_key_count_g_last = cmd_input_active.key_count[KEY_PRESS][Key_G];
+  }
+
+  // 键鼠模式下控制逻辑与遥控器拨杆解耦，互不干涉
+  // 键鼠模式默认底盘跟随云台；若开启小陀螺，则切到旋转模式。
+  chassis_cmd_send.chassis_mode = keyboard_rotate_mode_enabled
+                                      ? CHASSIS_ROTATE
+                                      : CHASSIS_FOLLOW_GIMBAL_YAW;
+  gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+  vision_cmd_send.vision_mode = VISION_MODE_OFF;
+  vision_cmd_send.allow_auto_fire = 0;
+
+  // 鼠标右键长按自瞄：按下接管，松开释放
+  // 右键优先级高于左键，进入自瞄后由视觉决定拨弹时机
+  const uint8_t mouse_left_pressed = cmd_input_active.mouse.press_l ? 1U : 0U;
+  static uint8_t mouse_left_pressed_last = 0U;
+  const uint8_t mouse_left_rising =
+      (mouse_left_pressed && !mouse_left_pressed_last) ? 1U : 0U;
+  mouse_left_pressed_last = mouse_left_pressed;
+
+  if (cmd_input_active.mouse.press_r) {
+    vision_cmd_send.vision_mode = VISION_MODE_AUTO_AIM;
+    vision_cmd_send.allow_auto_fire = 1; // 自瞄时由视觉控制是否发射
+    gimbal_cmd_send.gimbal_mode = GIMBAL_AUTOAIM_MODE;
+    shoot_cmd_send.load_mode = LOAD_STOP; // 先停止拨弹，等待视觉should_fire接管
+  }
+  // 鼠标左键按当前已选模式发射（需摩擦轮开启）
+  // 单发/三发采用“按下触发一次”，连发采用“按住持续发射”。
+  else if (mouse_left_pressed && shoot_cmd_send.friction_mode == FRICTION_ON) {
+    if (keyboard_load_mode_selected == LOAD_BURSTFIRE) {
+      shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
+    } else if (mouse_left_rising) {
+      shoot_cmd_send.load_mode = keyboard_load_mode_selected;
+    }
+  }
+
+  switch (cmd_input_active.key[KEY_PRESS]
               .shift) // 待添加 按shift允许超功率 消耗缓冲能量
   {
   case 1:
@@ -448,31 +1085,107 @@ static void MouseKeySet() {
   }
 }
 
+static void VTMControlSet() {
+  const uint8_t mode_switch = cmd_input_active.rc.switch_left;
+
+  /* VT03/VT13 只有一个模式开关，这里按单拨杆语义做控制分流:
+   * C(下): 摇杆手动，底盘不跟随云台，摩擦轮关闭
+   * N(中): 摇杆手动，底盘跟随云台，摩擦轮开启
+   * S(上): 键鼠控制，进入图传键鼠/自瞄路径 */
+  if (switch_is_up(mode_switch)) {
+    MouseKeySet();
+    return;
+  }
+
+  chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
+
+  if (switch_is_down(mode_switch)) {
+    chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
+    gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
+  } else {
+    chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
+    gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+    shoot_cmd_send.friction_mode = FRICTION_ON;
+  }
+
+  static float vx_filtered = 0.0f;
+  static float vy_filtered = 0.0f;
+  static float yaw_increment_filtered = 0.0f;
+  static float pitch_increment_filtered = 0.0f;
+
+  float vy_norm = (float)cmd_input_active.rc.rocker_l1 / 660.0f;
+  float vx_norm = (float)cmd_input_active.rc.rocker_l_ / 660.0f;
+  float yaw_norm = (float)cmd_input_active.rc.rocker_r_ / 660.0f;
+  float pitch_norm = (float)cmd_input_active.rc.rocker_r1 / 660.0f;
+
+  vx_filtered = LowPassFilter_Float(vx_norm, 0.90f, &vx_filtered);
+  vy_filtered = LowPassFilter_Float(vy_norm, 0.90f, &vy_filtered);
+  chassis_cmd_send.vx = vx_filtered;
+  chassis_cmd_send.vy = vy_filtered;
+
+  float yaw_increment = yaw_norm / 180.0f * M_PI;
+  float pitch_increment = pitch_norm / 180.0f * M_PI;
+
+  yaw_increment =
+      LowPassFilter_Float(yaw_increment, 0.95f, &yaw_increment_filtered);
+  pitch_increment =
+      LowPassFilter_Float(pitch_increment, 0.93f, &pitch_increment_filtered);
+
+  gimbal_cmd_send.yaw += yaw_increment;
+  gimbal_cmd_send.pitch += pitch_increment;
+  LIMIT_PITCH_RAD(gimbal_cmd_send.pitch);
+
+  shoot_cmd_send.load_mode = LOAD_STOP;
+  vision_cmd_send.vision_mode = VISION_MODE_OFF;
+  vision_cmd_send.allow_auto_fire = 0;
+  ui_loader_mode_selected = LOAD_STOP;
+}
+
 static void VisionControlSet() {
+  static uint8_t vision_autoaim_last = 0U;
+  const uint8_t autoaim_mode =
+      (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM) ? 1U : 0U;
+  const uint8_t vision_takeover =
+      (autoaim_mode && vision_data_recv.vision_takeover) ? 1U : 0U;
+
   // 默认清除视觉直接控制标志
   gimbal_cmd_send.vision_yaw_direct = 0;
   gimbal_cmd_send.vision_pitch_direct = 0;
 
-  // 仅当视觉模式启用且视觉接管有效时才传递控制量
-  if (vision_cmd_send.vision_mode != VISION_MODE_OFF &&
-      vision_data_recv.vision_takeover) {
-    // 传递视觉控制器计算好的控制量给云台
-    gimbal_cmd_send.vision_yaw_direct = 1;
-    gimbal_cmd_send.vision_yaw_current = vision_data_recv.yaw_current_cmd;
-    gimbal_cmd_send.vision_pitch_direct = 1;
-    gimbal_cmd_send.vision_pitch_ref = vision_data_recv.pitch_ref_limited;
-
-    // 注意：不在 cmd 层覆盖云台角度目标，避免在“视觉丢目标/无目标”时
-    //      云台目标角从视觉单圈角跳回导致突跳。
-    //      云台自瞄接管在 gimbal 层实现（Yaw 视觉双环，Pitch 参考限速）。
-
-    // 视觉驱动发射
-    if (vision_cmd_send.allow_auto_fire && vision_data_recv.should_fire) {
-      shoot_cmd_send.load_mode = LOAD_1_BULLET; // 视觉确认可以射击
-    } else {
-      shoot_cmd_send.load_mode = LOAD_STOP; // 未确认或未授权，停止拨盘
+  // 退出自瞄或视觉未接管时，立即清除视觉触发的拨弹命令
+  if (!autoaim_mode) {
+    if (vision_autoaim_last && !cmd_input_active.mouse.press_l) {
+      shoot_cmd_send.load_mode = LOAD_STOP;
     }
+    vision_autoaim_last = 0U;
+    return;
   }
+
+  if (!vision_takeover) {
+    shoot_cmd_send.load_mode = LOAD_STOP;
+    vision_autoaim_last = 1U;
+    return;
+  }
+
+  // 传递视觉控制器计算好的控制量给云台
+  gimbal_cmd_send.vision_yaw_direct = 1;
+  gimbal_cmd_send.vision_yaw_current = vision_data_recv.yaw_current_cmd;
+  gimbal_cmd_send.vision_pitch_direct = 1;
+  gimbal_cmd_send.vision_pitch_ref = vision_data_recv.pitch_ref_limited;
+
+  // 注意：不在 cmd 层覆盖云台角度目标，避免在“视觉丢目标/无目标”时
+  //      云台目标角从视觉单圈角跳回导致突跳。
+  //      云台自瞄接管在 gimbal 层实现（Yaw 视觉双环，Pitch 参考限速）。
+
+  // 视觉驱动发射（仅在开启自动开火时生效）
+  if (vision_cmd_send.allow_auto_fire && vision_data_recv.should_fire) {
+    shoot_cmd_send.load_mode = LOAD_1_BULLET;
+  } else {
+    shoot_cmd_send.load_mode = LOAD_STOP;
+  }
+
+  vision_autoaim_last = 1U;
 }
 
 /**
@@ -483,58 +1196,88 @@ static void VisionControlSet() {
  * 后续修改为遥控器离线则电机停止(关闭遥控器急停),通过给遥控器模块添加daemon实现
  *
  */
-static void EmergencyHandler() {
-  // 最高优先级：检测到离线或手动急停信号(开关在最下方)，则强制进入停止状态
-  if (!RemoteControlIsOnline()) {
-    robot_state = ROBOT_STOP; // 设置状态为停止
+static void EmergencyHandler(void) {
+  UpdateRobotSafetyState();
 
-    // 发送所有模块的停止指令
-    gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-    chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-    shoot_cmd_send.shoot_mode = SHOOT_OFF;
-    shoot_cmd_send.friction_mode = FRICTION_OFF;
-    shoot_cmd_send.load_mode = LOAD_STOP;
+  if (robot_state != ROBOT_READY) {
+    ApplyRobotStopOutputs();
+    return;
   }
-  // 仅当不满足急停条件时，才检查是否可以进入就绪状态
-  else {
-    // 这里可以根据需要设置进入 READY 的条件，
-    // 例如，当中位或上位时进入 READY 状态
-    // 为了安全，通常需要一个明确的动作来“解锁”机器人
-    // 只有当机器人从STOP状态恢复时，才设置一次READY
-    if (robot_state == ROBOT_STOP) {
-      robot_state = ROBOT_READY;
-      shoot_cmd_send.shoot_mode = SHOOT_ON; // 恢复发射模块
-      LOGINFO("[CMD] Robot reinstated, ready to operate.");
-    }
-  }
+
+  shoot_cmd_send.shoot_mode = SHOOT_ON;
 }
 
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
 void RobotCMDTask() {
+  RemoteControlProcess();
+  VTMInputProcess();
+
   // BMI088Acquire(bmi088_test,&bmi088_data) ;
   // 从其他应用获取回传数据
 #ifdef ONE_BOARD
   SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
-  chassis_fetch_data = *(Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
+  if (cmd_can_comm != NULL && CANCommIsOnline(cmd_can_comm)) {
+    Chassis_Upload_Data_s *recv_data =
+        (Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
+    if (recv_data != NULL) {
+      chassis_fetch_data = *recv_data;
+    } else {
+      ResetChassisFetchDataSafe();
+    }
+  } else {
+    const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+    ResetChassisFetchDataSafe();
+    if ((now_ms - cmd_last_can_warn_ms) >= 500U) {
+      LOGWARNING("[cmd] Chassis CAN link offline, fallback to safe defaults.");
+      cmd_last_can_warn_ms = now_ms;
+    }
+  }
 #endif // GIMBAL_BOARD
   SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
   SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
   SubGetMessage(vision_data_sub, &vision_data_recv); // 获取视觉处理数据
+  UpdateRegularBridgeState();
+  SelectActiveControlInput();
+  UpdateUIRefreshRequest();
+
+  // 最高优先级：先同步安全状态，再决定是否继续执行控制逻辑
+  EmergencyHandler();
+  if (robot_state != ROBOT_READY) {
+
+#ifdef ONE_BOARD
+  PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
+#endif // ONE_BOARD
+#ifdef GIMBAL_BOARD
+  if (cmd_can_comm != NULL) {
+    CANCommSend(cmd_can_comm, (void *)&chassis_cmd_send);
+  }
+#endif // GIMBAL_BOARD
+  PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
+  PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
+  PubPushMessage(vision_cmd_pub, (void *)&vision_cmd_send);
+  return;
+  }
 
   // 计算云台-底盘角度关系（offset_angle 和 near_center_error）
   CalcGimbalChassisAngle();
 
-  // 控制逻辑优先级（从低到高）：
-  // 1️⃣ 遥控器基础控制（提供默认控制量）
-  RemoteControlSet();
+  if (cmd_input_source == CMD_INPUT_SOURCE_VTM) {
+    VTMControlSet();
+  } else if (switch_is_up(cmd_input_active.rc.switch_right)) {
+    MouseKeySet();
+  } else {
+    RemoteControlSet();
+  }
+  // 根据视觉反馈更新跟踪状态，并执行裁判/链路门控与降级策略
+  UpdateVisionTrackingFlag();
+  UpdateShootRateFeedforward100ms();
+  UpdateAutoFireGate();
 
-  // 2️⃣ 视觉数据融合（当视觉有效时覆盖云台和发射控制）
+  // 视觉数据融合（当视觉有效时覆盖云台控制；可选自动开火）
   VisionControlSet();
-
-  // 3️⃣ 紧急停止处理（最高优先级，强制停止所有模块）
-  EmergencyHandler();
+  PublishImageTelemetrySummary();
 
   // 推送消息,双板通信,视觉通信等
   // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
@@ -542,7 +1285,9 @@ void RobotCMDTask() {
   PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
-  CANCommSend(cmd_can_comm, (void *)&chassis_cmd_send);
+  if (cmd_can_comm != NULL) {
+    CANCommSend(cmd_can_comm, (void *)&chassis_cmd_send);
+  }
 #endif // GIMBAL_BOARD
   PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
   PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);

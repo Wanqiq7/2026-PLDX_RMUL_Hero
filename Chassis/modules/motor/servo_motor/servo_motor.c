@@ -16,6 +16,7 @@ ServoInstance *ServoInit(Servo_Init_Config_s *Servo_Init_Config)
     ServoInstance *servo = (ServoInstance *)malloc(sizeof(ServoInstance));
     memset(servo, 0, sizeof(ServoInstance));
     USART_Init_Config_s config;
+    memset(&config, 0, sizeof(config));
     servo->servo_type = Servo_Init_Config->servo_type;
     switch (Servo_Init_Config->servo_type)
     {

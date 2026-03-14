@@ -13,11 +13,11 @@
 #ifndef _USER_LIB_H
 #define _USER_LIB_H
 
-#include "arm_math.h"
-#include "cmsis_os.h"
 #include "main.h"
-#include "stdint.h"
 #include "stm32f407xx.h"
+#include "arm_math_compat.h"
+#include "cmsis_os.h"
+#include "stdint.h"
 
 #ifndef user_malloc
 #ifdef _CMSIS_OS_H

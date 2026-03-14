@@ -9,7 +9,6 @@
 /* 对于双发射机构的机器人,将下面的数据封装成结构体即可,生成两份shoot应用实例 */
 static DJIMotorInstance *friction_lf, *friction_rf, *friction_lb, *friction_rb,
     *loader; // 拨盘电机
-// static servo_instance *lid; 需要增加弹舱盖
 
 static Publisher_t *shoot_pub;
 static Shoot_Ctrl_Cmd_s shoot_cmd_recv; // 来自cmd的发射控制信息
@@ -285,13 +284,6 @@ void ShootTask() {
     DJIMotorSetRef(friction_rf, 0);
     // 关闭时清零前馈
     fric_ff_cur_lf = fric_ff_cur_lb = fric_ff_cur_rf = fric_ff_cur_rb = 0.0f;
-  }
-
-  // 开关弹舱盖
-  if (shoot_cmd_recv.lid_mode == LID_CLOSE) {
-    //...
-  } else if (shoot_cmd_recv.lid_mode == LID_OPEN) {
-    //...
   }
 
   // 反馈数据,目前暂时没有要设定的反馈数据,后续可能增加应用离线监测以及卡弹反馈

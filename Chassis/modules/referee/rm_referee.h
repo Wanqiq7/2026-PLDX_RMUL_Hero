@@ -36,12 +36,6 @@ typedef enum {
   UI_FRICTION_ON,
 } ui_friction_mode_e;
 
-// 弹舱盖模式（UI显示用）
-typedef enum {
-  UI_LID_OPEN = 0,
-  UI_LID_CLOSE,
-} ui_lid_mode_e;
-
 // 功率数据（UI显示用）
 typedef struct {
   float chassis_power_mx;
@@ -76,8 +70,19 @@ typedef struct
 	ext_robot_hurt_t RobotHurt;							   // 0x0206
 	ext_shoot_data_t ShootData;							   // 0x0207
 
-	// 自定义交互数据的接收
-	Communicate_ReceiveData_t ReceiveData;
+	// 自定义交互数据的接收（0x0301，DataLength驱动）
+	robot_interactive_data_var_t ReceiveData;
+	uint8_t ReceiveDataValid;
+
+	// 常规链路扩展命令接收缓存（仅协议层落地）
+	ext_map_command_t MapCommandData;
+	ext_map_robot_data_t MapRobotData;
+	ext_map_path_data_t MapPathData;
+	ext_map_robot_custom_data_t MapRobotCustomData;
+	uint8_t MapCommandValid;
+	uint8_t MapRobotDataValid;
+	uint8_t MapPathDataValid;
+	uint8_t MapRobotCustomDataValid;
 
 	uint8_t init_flag;
 
@@ -89,7 +94,6 @@ typedef struct
 	uint32_t chassis_flag : 1;
 	uint32_t gimbal_flag : 1;
 	uint32_t shoot_flag : 1;
-	uint32_t lid_flag : 1;
 	uint32_t friction_flag : 1;
 	uint32_t Power_flag : 1;
 } Referee_Interactive_Flag_t;
@@ -103,7 +107,6 @@ typedef struct
 	ui_gimbal_mode_e gimbal_mode;				 // 云台模式
 	ui_shoot_mode_e shoot_mode;				 // 发射模式设置
 	ui_friction_mode_e friction_mode;			 // 摩擦轮关闭
-	ui_lid_mode_e lid_mode;					 // 弹舱盖打开
 	UI_Chassis_Power_Data_s Chassis_Power_Data; // 功率控制
 
 	// 上一次的模式，用于flag判断
@@ -111,7 +114,6 @@ typedef struct
 	ui_gimbal_mode_e gimbal_last_mode;
 	ui_shoot_mode_e shoot_last_mode;
 	ui_friction_mode_e friction_last_mode;
-	ui_lid_mode_e lid_last_mode;
 	UI_Chassis_Power_Data_s Chassis_last_Power_Data;
 
 } Referee_Interactive_info_t;
@@ -134,5 +136,58 @@ referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle);
  * @param tx_len 发送长度
  */
 void RefereeSend(uint8_t *send, uint16_t tx_len);
+
+/**
+ * @brief 获取裁判系统在线状态
+ * @return 1在线, 0离线
+ */
+uint8_t RefereeIsOnline(void);
+
+/**
+ * @brief 推进裁判串口流式解析状态机
+ *
+ * @note 必须在任务上下文中周期调用,避免将复杂协议解析放回 UART ISR
+ */
+void RefereeProcess(void);
+
+/**
+ * @brief 尝试消费0x0301交互数据，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeReceiveData(robot_interactive_data_var_t *out_data);
+
+/**
+ * @brief 尝试消费0x0303地图命令，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeMapCommand(ext_map_command_t *out_data);
+
+/**
+ * @brief 尝试消费0x0305机器人数据，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeMapRobotData(ext_map_robot_data_t *out_data);
+
+/**
+ * @brief 尝试消费0x0307路径数据，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeMapPathData(ext_map_path_data_t *out_data);
+
+/**
+ * @brief 尝试消费0x0308自定义机器人数据，成功后自动清除有效标志
+ * @param out_data 输出数据指针，可为NULL
+ * @return 1成功消费, 0无新数据
+ */
+uint8_t RefereeTryConsumeMapRobotCustomData(ext_map_robot_custom_data_t *out_data);
+
+/**
+ * @brief 清空扩展协议有效标志位
+ */
+void RefereeClearExtendedDataFlags(void);
 
 #endif // !REFEREE_H

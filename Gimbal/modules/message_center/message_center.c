@@ -2,12 +2,28 @@
 #include "stdlib.h"
 #include "string.h"
 #include "bsp_log.h"
+#include "stm32f4xx.h"
 
 /* message_center是fake head node,是方便链表编写的技巧,这样就不需要处理链表头的特殊情况 */
 static Publisher_t message_center = {
     .topic_name = "Message_Manager",
     .first_subs = NULL,
     .next_topic_node = NULL};
+
+static inline uint32_t MessageCenterEnterCritical(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static inline void MessageCenterExitCritical(uint32_t primask)
+{
+    if ((primask & 0x1U) == 0U)
+    {
+        __enable_irq();
+    }
+}
 
 static void CheckName(char *name)
 {
@@ -83,23 +99,37 @@ Subscriber_t *RegisterSubscriber(char *name, uint8_t data_len)
 /* 如果队列为空,会返回0;成功获取数据,返回1;后续可以做更多的修改,比如剩余消息数目等 */
 uint8_t SubGetMessage(Subscriber_t *sub, void *data_ptr)
 {
-    if (sub->temp_size == 0)
+    if (sub == NULL || data_ptr == NULL)
     {
         return 0;
     }
+
+    uint32_t primask = MessageCenterEnterCritical();
+    if (sub->temp_size == 0)
+    {
+        MessageCenterExitCritical(primask);
+        return 0;
+    }
     memcpy(data_ptr, sub->queue[sub->front_idx], sub->data_len);
-    sub->front_idx = (sub->front_idx++) % QUEUE_SIZE; // 队列头索引增加
+    sub->front_idx = (sub->front_idx + 1U) % QUEUE_SIZE; // 队列头索引增加
     sub->temp_size--;                                 // pop一个数据,长度减1
+    MessageCenterExitCritical(primask);
     return 1;
 }
 
 uint8_t PubPushMessage(Publisher_t *pub, void *data_ptr)
 {
-    static Subscriber_t *iter;
-    iter = pub->first_subs; // iter作为订阅者指针,遍历订阅该话题的所有订阅者;如果为空说明遍历结束
+    if (pub == NULL || data_ptr == NULL)
+    {
+        return 0;
+    }
+
+    Subscriber_t *iter = pub->first_subs; // iter作为订阅者指针,遍历订阅该话题的所有订阅者;如果为空说明遍历结束
     // 遍历订阅了当前话题的所有订阅者,依次填入最新消息
     while (iter)
     {
+        uint32_t primask = MessageCenterEnterCritical();
+        Subscriber_t *next = iter->next_subs_queue;
         if (iter->temp_size == QUEUE_SIZE) // 如果队列已满,则需要删除最老的数据(头部),再填入
         {
             // 队列头索引前移动,相当于抛弃前一个位置的数据,被抛弃的位置稍后会被写入新的数据
@@ -110,8 +140,9 @@ uint8_t PubPushMessage(Publisher_t *pub, void *data_ptr)
         memcpy(iter->queue[iter->back_idx], data_ptr, pub->data_len);
         iter->back_idx = (iter->back_idx + 1) % QUEUE_SIZE; // 队列尾部前移
         iter->temp_size++;                                  // 入队,size+1
+        MessageCenterExitCritical(primask);
 
-        iter = iter->next_subs_queue; // 访问下一个订阅者
+        iter = next; // 访问下一个订阅者
     }
     return 1;
 }
