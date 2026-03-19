@@ -31,7 +31,7 @@
 #define mcos(x) (arm_cos_f32(x))
 
 typedef arm_matrix_instance_f32 mat;
-// 閼汇儴绻嶇粻妤呪偓鐔峰娑撳秴顧�,閸欘垯浜掓担璺ㄦ暏q31娴狅絾娴沠32,娴ｅ棙妲哥划鎯у娴兼岸妾锋担锟�
+// 若运算速度不够，可以使用 q31 代替 f32，但精度会下降
 #define MatAdd arm_mat_add_f32
 #define MatSubtract arm_mat_sub_f32
 #define MatMultiply arm_mat_mult_f32
@@ -78,29 +78,27 @@ void MatInit(mat *m, uint8_t row, uint8_t col);
 #define VAL_MAX(a, b) ((a) > (b) ? (a) : (b))
 
 /**
- * @brief
- * 鏉╂柨娲栨稉鈧崸妤€鍏遍崙鈧惃鍕敶閿燂拷?,娑撳秷绻冩禒宥囧姧闂団偓鐟曚礁宸遍崚鎯版祮閿燂拷?娑撹桨缍橀棁鈧憰浣烘畱缁鐎�
- *
- * @param size 閸掑棝鍘ゆ径褍鐨�
+ * @brief 返回一块清零后的内存，但仍需要强制转换为目标类型
+ * @param size 分配大小
  * @return void*
  */
 void *zmalloc(size_t size);
 
-// 閿熸枻鎷烽敓鍔尅鎷烽敓鏂ゆ嫹
+// 平方根
 float Sqrt(float x);
-// 閿熸枻鎷烽敓鏂ゆ嫹閿熸枻鎷烽敓鏂ゆ嫹
+// 绝对值限幅
 float abs_limit(float num, float Limit);
-// 閿熷彨鏂嚖鎷烽敓鏂ゆ嫹浣�
+// 判断符号位
 float sign(float value);
-// 閿熸枻鎷烽敓鏂ゆ嫹閿熸枻鎷烽敓鏂ゆ嫹
+// 浮点数死区处理
 float float_deadband(float Value, float minValue, float maxValue);
-// 閿熺潾鍑ゆ嫹閿熸枻鎷烽敓鏂ゆ嫹
+// 浮点数限幅
 float float_constrain(float Value, float minValue, float maxValue);
-// 閿熺潾鍑ゆ嫹閿熸枻鎷烽敓鏂ゆ嫹
+// int16 限幅
 int16_t int16_constrain(int16_t Value, int16_t minValue, int16_t maxValue);
-// 寰敓鏂ゆ嫹閿熺潾鍑ゆ嫹閿熸枻鎷烽敓鏂ゆ嫹
+// 循环浮点数限幅
 float loop_float_constrain(float Input, float minValue, float maxValue);
-// 閿熻璁规嫹 閿熸枻鎷烽敓鐫嚖鎷� 180 ~ -180
+// 角度格式化到 180 ~ -180
 float theta_format(float Ang);
 
 int float_rounding(float raw);
@@ -123,7 +121,7 @@ float LowPassFilter_Float(float new_value, float K, float *last_value);
 
 #define rad_format(Ang) loop_float_constrain((Ang), -PI, PI)
 
-// 鏂滃潯杞鍒掑叕鍏辨帴鍙�
+// 斜坡软规划公共接口
 float SoftRamp(float target, float current, float reserved_zero, float accel,
                float decel, float brake_decel, float dt);
 

@@ -522,6 +522,12 @@ void ChassisTask() {
   // 6. 根据电机的反馈速度和IMU(如果有)计算真实速度
   // EstimateSpeed();
 
+  if (referee_data != NULL) {
+    chassis_feedback_data.bullet_speed_limit = referee_data->ShootData.bullet_speed;
+  } else {
+    chassis_feedback_data.bullet_speed_limit = 0.0f;
+  }
+
   // // 获取裁判系统数据
   // 建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
   // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue ,

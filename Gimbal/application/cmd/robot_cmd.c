@@ -5,6 +5,7 @@
 #include "bmi088.h"
 #include "dji_motor.h"
 #include "general_def.h"
+#include "heat_gate_model.h"
 #include "ins_task.h"
 #include "message_center.h"
 #include "remote_control.h"
@@ -140,7 +141,8 @@ static float keyboard_vy_cmd_planned = 0.0f;
 static int keyboard_power_mode_selected = 100;
 static loader_mode_e keyboard_load_mode_selected = LOAD_STOP;
 static loader_mode_e ui_loader_mode_selected = LOAD_STOP;
-static uint8_t keyboard_rotate_mode_enabled = 0U; // 0: 键鼠跟随模式 1: 小陀螺
+static chassis_mode_e keyboard_chassis_mode_selected =
+    CHASSIS_FOLLOW_GIMBAL_YAW; // 键鼠模式默认底盘跟随云台
 
 // 失联降级状态机与门控参数
 typedef enum {
@@ -159,6 +161,19 @@ static uint32_t cmd_last_ff_update_ms = 0;
 static uint8_t cmd_force_safe_fire = 0;
 static float cmd_rest_heat_filtered = 0.0f;
 static float cmd_shoot_rate_ff = 1.0f;
+static Heat_Gate_State_s cmd_heat_gate;
+static uint16_t cmd_last_barrel_heat = 0U;
+static uint16_t cmd_last_barrel_heat_limit = 0U;
+static uint16_t cmd_last_barrel_cooling_value = 0U;
+static uint8_t cmd_last_rest_heat_raw = 0U;
+static uint8_t cmd_heat_snapshot_valid = 0U;
+static loader_mode_e cmd_last_discrete_gate_mode = LOAD_STOP;
+static uint8_t cmd_last_discrete_gate_allow = 0U;
+static uint8_t cmd_burst_gate_active = 0U;
+static uint32_t cmd_burst_gate_last_ms = 0U;
+static float cmd_last_required_heat = 0.0f;
+static uint8_t cmd_last_gate_allow = 0U;
+static loader_mode_e cmd_last_gate_mode = LOAD_STOP;
 static uint8_t cmd_unlock_prev_safe_hold = 0U;
 static uint8_t cmd_ui_refresh_trigger_prev = 0U;
 typedef struct {
@@ -167,15 +182,6 @@ typedef struct {
   uint8_t last_valid_mask;
   uint8_t seq;
   uint32_t last_update_ms;
-  float map_target_x;
-  float map_target_y;
-  uint8_t map_target_robot_id;
-  uint8_t map_cmd_keyboard;
-  uint8_t map_path_intention;
-  uint8_t map_custom_head0;
-  uint8_t map_custom_head1;
-  uint8_t map_custom_head2;
-  uint8_t map_custom_head3;
 } Regular_Bridge_State_s;
 static Regular_Bridge_State_s regular_bridge_state;
 
@@ -184,7 +190,9 @@ static const uint32_t CMD_DEGRADE_EXIT_HOLD_MS = 300U;
 static const uint32_t CMD_GATE_TELEMETRY_PERIOD_MS = 500U;
 static const uint32_t CMD_REGULAR_BRIDGE_STALE_MS = 400U;
 static const uint32_t CMD_FF_UPDATE_PERIOD_MS = 100U;
-static const float CMD_REST_HEAT_FUSION_ALPHA = 0.25f;
+// 单发/三发采用脉冲触发。为避免 cmd 与 shoot 任务相位错开导致单帧脉冲丢失，
+// 这里将触发命令短暂保持数十毫秒，让 shoot 任务至少能消费一次。
+static const uint32_t CMD_MOUSE_FIRE_PULSE_HOLD_MS = 30U;
 static const float CMD_MIN_REST_HEAT_TO_FIRE = HEAT_PER_SHOT_D;
 static const float CMD_SAFE_SHOOT_RATE = SHOOT_RATE_SAFE;
 
@@ -215,19 +223,6 @@ static void ResetChassisFetchDataSafe(void) {
   chassis_fetch_data.regular_bridge_capability = 0U;
   chassis_fetch_data.regular_cmd_valid_mask = 0U;
   chassis_fetch_data.regular_cmd_seq = 0U;
-  chassis_fetch_data.map_target_x = 0.0f;
-  chassis_fetch_data.map_target_y = 0.0f;
-  chassis_fetch_data.map_target_robot_id = 0U;
-  chassis_fetch_data.map_cmd_keyboard = 0U;
-  chassis_fetch_data.map_hero_x = 0U;
-  chassis_fetch_data.map_hero_y = 0U;
-  chassis_fetch_data.map_sentry_x = 0U;
-  chassis_fetch_data.map_sentry_y = 0U;
-  chassis_fetch_data.map_path_intention = 0U;
-  chassis_fetch_data.map_custom_head0 = 0U;
-  chassis_fetch_data.map_custom_head1 = 0U;
-  chassis_fetch_data.map_custom_head2 = 0U;
-  chassis_fetch_data.map_custom_head3 = 0U;
 }
 
 static void ResetRegularBridgeState(void) {
@@ -331,7 +326,10 @@ static void UpdateRegularBridgeState(void) {
 
   regular_bridge_state.online = bridge_online;
   if (!bridge_online) {
+    regular_bridge_state.capability = 0U;
+    regular_bridge_state.seq = 0U;
     regular_bridge_state.last_valid_mask = 0U;
+    regular_bridge_state.last_update_ms = 0U;
     return;
   }
 
@@ -340,26 +338,10 @@ static void UpdateRegularBridgeState(void) {
   regular_bridge_state.seq = chassis_fetch_data.regular_cmd_seq;
   regular_bridge_state.last_valid_mask =
       chassis_fetch_data.regular_cmd_valid_mask;
-
-  if (chassis_fetch_data.regular_cmd_valid_mask & REGULAR_BRIDGE_VALID_0303) {
-    regular_bridge_state.map_target_x = chassis_fetch_data.map_target_x;
-    regular_bridge_state.map_target_y = chassis_fetch_data.map_target_y;
-    regular_bridge_state.map_target_robot_id =
-        chassis_fetch_data.map_target_robot_id;
-    regular_bridge_state.map_cmd_keyboard = chassis_fetch_data.map_cmd_keyboard;
+  if (regular_bridge_state.last_valid_mask != 0U) {
     regular_bridge_state.last_update_ms = now_ms;
-  }
-  if (chassis_fetch_data.regular_cmd_valid_mask & REGULAR_BRIDGE_VALID_0307) {
-    regular_bridge_state.map_path_intention =
-        chassis_fetch_data.map_path_intention;
-    regular_bridge_state.last_update_ms = now_ms;
-  }
-  if (chassis_fetch_data.regular_cmd_valid_mask & REGULAR_BRIDGE_VALID_0308) {
-    regular_bridge_state.map_custom_head0 = chassis_fetch_data.map_custom_head0;
-    regular_bridge_state.map_custom_head1 = chassis_fetch_data.map_custom_head1;
-    regular_bridge_state.map_custom_head2 = chassis_fetch_data.map_custom_head2;
-    regular_bridge_state.map_custom_head3 = chassis_fetch_data.map_custom_head3;
-    regular_bridge_state.last_update_ms = now_ms;
+  } else {
+    regular_bridge_state.last_update_ms = 0U;
   }
 }
 
@@ -393,6 +375,74 @@ static uint8_t IsShootLoadFireIntent(loader_mode_e load_mode) {
              : 0U;
 }
 
+static float GetRequiredHeatForLoadMode(loader_mode_e load_mode) {
+  switch (load_mode) {
+  case LOAD_3_BULLET:
+    return 3.0f * HEAT_PER_SHOT_D;
+  case LOAD_1_BULLET:
+  case LOAD_BURSTFIRE:
+    return HEAT_PER_SHOT_D;
+  default:
+    return 0.0f;
+  }
+}
+
+static void ResetManualHeatGateState(uint32_t now_ms) {
+  cmd_last_discrete_gate_mode = LOAD_STOP;
+  cmd_last_discrete_gate_allow = 0U;
+  cmd_burst_gate_active = 0U;
+  cmd_burst_gate_last_ms = now_ms;
+  cmd_last_required_heat = 0.0f;
+  cmd_last_gate_allow = 0U;
+  cmd_last_gate_mode = LOAD_STOP;
+}
+
+static float GetRawRestHeatFloat(void) {
+  if (chassis_fetch_data.barrel_heat_limit > 0U) {
+    return HeatGateComputeRestHeat(chassis_fetch_data.barrel_heat_limit,
+                                   chassis_fetch_data.barrel_heat);
+  }
+  return (float)chassis_fetch_data.rest_heat;
+}
+
+static uint8_t HasHeatSnapshotUpdated(void) {
+  if (!cmd_heat_snapshot_valid) {
+    return 1U;
+  }
+
+  return (cmd_last_barrel_heat != chassis_fetch_data.barrel_heat ||
+          cmd_last_barrel_heat_limit != chassis_fetch_data.barrel_heat_limit ||
+          cmd_last_barrel_cooling_value !=
+              chassis_fetch_data.barrel_cooling_value ||
+          cmd_last_rest_heat_raw != chassis_fetch_data.rest_heat)
+             ? 1U
+             : 0U;
+}
+
+static void SyncHeatGateState(uint32_t now_ms, uint8_t referee_online) {
+  if (!referee_online) {
+    HeatGateReset(&cmd_heat_gate, 0.0f, 0.0f, 0.0f, now_ms);
+    cmd_heat_snapshot_valid = 0U;
+    cmd_rest_heat_filtered = 0.0f;
+    return;
+  }
+
+  {
+    const uint8_t raw_updated = HasHeatSnapshotUpdated();
+    HeatGateUpdateRaw(&cmd_heat_gate, GetRawRestHeatFloat(),
+                      (float)chassis_fetch_data.barrel_cooling_value,
+                      (float)chassis_fetch_data.barrel_heat_limit, raw_updated,
+                      now_ms);
+
+    cmd_last_barrel_heat = chassis_fetch_data.barrel_heat;
+    cmd_last_barrel_heat_limit = chassis_fetch_data.barrel_heat_limit;
+    cmd_last_barrel_cooling_value = chassis_fetch_data.barrel_cooling_value;
+    cmd_last_rest_heat_raw = chassis_fetch_data.rest_heat;
+    cmd_heat_snapshot_valid = 1U;
+    cmd_rest_heat_filtered = cmd_heat_gate.predicted_rest_heat;
+  }
+}
+
 static void UpdateShootRateFeedforward100ms(void) {
   const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
   const uint8_t link_online = IsChassisLinkOnline();
@@ -404,7 +454,7 @@ static void UpdateShootRateFeedforward100ms(void) {
     cmd_last_ff_update_ms = now_ms;
 
     if (referee_online) {
-      float m = (float)chassis_fetch_data.rest_heat;
+      float m = GetRawRestHeatFloat();
       if (m <= 0.0f && chassis_fetch_data.barrel_heat_limit >
                            chassis_fetch_data.barrel_heat) {
         m = (float)(chassis_fetch_data.barrel_heat_limit -
@@ -444,6 +494,7 @@ static void UpdateAutoFireGate(void) {
   const uint8_t vision_online = VisionIsOnline() ? 1U : 0U;
   const uint8_t autoaim_mode =
       (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM) ? 1U : 0U;
+  const loader_mode_e requested_load_mode = shoot_cmd_send.load_mode;
   const uint8_t bridge_cmd_fresh =
       (regular_bridge_state.online &&
        regular_bridge_state.last_update_ms > 0U &&
@@ -451,22 +502,19 @@ static void UpdateAutoFireGate(void) {
         CMD_REGULAR_BRIDGE_STALE_MS))
           ? 1U
           : 0U;
+  const float raw_rest_heat = GetRawRestHeatFloat();
+  const uint8_t manual_fire_request = IsShootLoadFireIntent(requested_load_mode);
+  float gate_rest_heat = 0.0f;
+  float required_heat = 0.0f;
+  uint8_t manual_fire_ok = 0U;
 
-  if (referee_online) {
-    float referee_rest_heat = (float)chassis_fetch_data.rest_heat;
-    cmd_rest_heat_filtered += CMD_REST_HEAT_FUSION_ALPHA *
-                              (referee_rest_heat - cmd_rest_heat_filtered);
-  } else {
-    cmd_rest_heat_filtered *= 0.95f;
-  }
-  cmd_rest_heat_filtered =
-      float_constrain(cmd_rest_heat_filtered, 0.0f, 255.0f);
+  SyncHeatGateState(now_ms, referee_online);
+  gate_rest_heat = referee_online ? cmd_heat_gate.predicted_rest_heat : 0.0f;
+  cmd_rest_heat_filtered = gate_rest_heat;
 
   Cmd_Degrade_State_e next_candidate = CMD_STATE_NORMAL;
   if (!link_online) {
     next_candidate = CMD_STATE_DEGRADED_LINK;
-  } else if (!referee_online) {
-    next_candidate = CMD_STATE_DEGRADED_REFEREE;
   } else if (autoaim_mode && !vision_online) {
     next_candidate = CMD_STATE_DEGRADED_VISION;
   }
@@ -486,34 +534,73 @@ static void UpdateAutoFireGate(void) {
 
   cmd_force_safe_fire = (cmd_degrade_state == CMD_STATE_NORMAL) ? 0U : 1U;
 
-  (void)referee_online;
   shoot_cmd_send.bullet_speed = SHOOT_FIXED_BULLET_SPEED;
-  shoot_cmd_send.rest_heat = (uint8_t)cmd_rest_heat_filtered;
+  shoot_cmd_send.rest_heat =
+      (uint8_t)float_constrain(cmd_rest_heat_filtered, 0.0f, 255.0f);
 
   uint8_t operator_auto_fire_request =
       (autoaim_mode && vision_cmd_send.allow_auto_fire) ? 1U : 0U;
-  uint8_t bridge_target_ok = 1U;
-  if (bridge_cmd_fresh &&
-      (regular_bridge_state.capability & REGULAR_BRIDGE_CAP_0303)) {
-    // 仅在桥接命令新鲜可用时追加目标有效性门控，无数据时不打断原流程
-    bridge_target_ok =
-        (regular_bridge_state.map_target_robot_id != 0U) ? 1U : 0U;
+  if (requested_load_mode != LOAD_BURSTFIRE) {
+    cmd_burst_gate_active = 0U;
+    cmd_burst_gate_last_ms = now_ms;
   }
-  const float gate_rest_heat = referee_online
-                                   ? (float)chassis_fetch_data.rest_heat
-                                   : cmd_rest_heat_filtered;
-  uint8_t heat_ok = (gate_rest_heat >= CMD_MIN_REST_HEAT_TO_FIRE) ? 1U : 0U;
-  uint8_t manual_fire_request = IsShootLoadFireIntent(shoot_cmd_send.load_mode);
-  uint8_t manual_fire_ok =
-      (manual_fire_request && referee_online && link_online && heat_ok &&
-       !cmd_force_safe_fire)
-          ? 1U
-          : 0U;
+  if (requested_load_mode != LOAD_1_BULLET &&
+      requested_load_mode != LOAD_3_BULLET) {
+    cmd_last_discrete_gate_mode = LOAD_STOP;
+    cmd_last_discrete_gate_allow = 0U;
+  }
+  if (!manual_fire_request || !referee_online || !link_online ||
+      cmd_force_safe_fire) {
+    cmd_last_discrete_gate_mode = LOAD_STOP;
+    cmd_last_discrete_gate_allow = 0U;
+    if (requested_load_mode == LOAD_BURSTFIRE) {
+      cmd_burst_gate_active = 0U;
+      cmd_burst_gate_last_ms = now_ms;
+    }
+  }
+
+  if (manual_fire_request && link_online && !cmd_force_safe_fire) {
+    if (!referee_online) {
+      manual_fire_ok = 1U;
+    } else {
+      required_heat = GetRequiredHeatForLoadMode(requested_load_mode);
+      if (requested_load_mode == LOAD_BURSTFIRE) {
+        if (!cmd_burst_gate_active) {
+          manual_fire_ok =
+              HeatGateTryReserve(&cmd_heat_gate, required_heat, now_ms);
+          cmd_burst_gate_active = manual_fire_ok;
+          cmd_burst_gate_last_ms = now_ms;
+        } else {
+          const uint32_t burst_dt_ms =
+              (now_ms > cmd_burst_gate_last_ms)
+                  ? (now_ms - cmd_burst_gate_last_ms)
+                  : 0U;
+          required_heat =
+              shoot_cmd_send.shoot_rate * HEAT_PER_SHOT_D *
+              ((float)burst_dt_ms / 1000.0f);
+          manual_fire_ok =
+              HeatGateTryReserve(&cmd_heat_gate, required_heat, now_ms);
+          cmd_burst_gate_last_ms = now_ms;
+        }
+      } else if (requested_load_mode != cmd_last_discrete_gate_mode) {
+        manual_fire_ok =
+            HeatGateTryReserve(&cmd_heat_gate, required_heat, now_ms);
+        cmd_last_discrete_gate_mode =
+            manual_fire_ok ? requested_load_mode : LOAD_STOP;
+        cmd_last_discrete_gate_allow = manual_fire_ok;
+      } else {
+        manual_fire_ok = cmd_last_discrete_gate_allow;
+      }
+    }
+  }
+  cmd_rest_heat_filtered = cmd_heat_gate.predicted_rest_heat;
+  gate_rest_heat = cmd_rest_heat_filtered;
+
+  const uint8_t heat_ok = (gate_rest_heat >= CMD_MIN_REST_HEAT_TO_FIRE) ? 1U : 0U;
   uint8_t auto_fire_ok =
       (operator_auto_fire_request && vision_data_recv.vision_valid &&
        vision_data_recv.target_locked && vision_data_recv.vision_takeover &&
-       referee_online && link_online && heat_ok && bridge_target_ok &&
-       !cmd_force_safe_fire)
+       link_online && !cmd_force_safe_fire && (!referee_online || heat_ok))
           ? 1U
           : 0U;
 
@@ -534,14 +621,31 @@ static void UpdateAutoFireGate(void) {
     shoot_cmd_send.load_mode = LOAD_STOP;
   }
 
+  shoot_cmd_send.rest_heat =
+      (uint8_t)float_constrain(cmd_rest_heat_filtered, 0.0f, 255.0f);
+  cmd_last_required_heat =
+      manual_fire_request
+          ? required_heat
+          : (operator_auto_fire_request ? CMD_MIN_REST_HEAT_TO_FIRE : 0.0f);
+  cmd_last_gate_allow = manual_fire_request ? manual_fire_ok : auto_fire_ok;
+  cmd_last_gate_mode = requested_load_mode;
+
   if ((now_ms - cmd_last_telemetry_ms) >= CMD_GATE_TELEMETRY_PERIOD_MS) {
-    LOGINFO("[cmd-gate] state=%d link=%u referee=%u vision=%u auto=%u "
-            "heat_f=%.1f heat_raw=%u track=%u bridge=%u bmask=0x%02X tgt=%u",
+    char req_heat_str[16];
+    char raw_heat_str[16];
+    char pred_heat_str[16];
+    Float2Str(req_heat_str, cmd_last_required_heat);
+    Float2Str(raw_heat_str, raw_rest_heat);
+    Float2Str(pred_heat_str, cmd_rest_heat_filtered);
+    LOGINFO("[cmd-gate] state=%d link=%u referee=%u vision=%u "
+            "req_mode=%d allow=%u req_heat=%s raw=%s pred=%s cool=%u "
+            "auto=%u track=%u bridge=%u bmask=0x%02X",
             (int)cmd_degrade_state, link_online, referee_online, vision_online,
-            vision_cmd_send.allow_auto_fire, cmd_rest_heat_filtered,
-            chassis_fetch_data.rest_heat, chassis_cmd_send.vision_is_tracking,
-            bridge_cmd_fresh, regular_bridge_state.last_valid_mask,
-            regular_bridge_state.map_target_robot_id);
+            (int)cmd_last_gate_mode, cmd_last_gate_allow, req_heat_str,
+            raw_heat_str, pred_heat_str, chassis_fetch_data.barrel_cooling_value,
+            vision_cmd_send.allow_auto_fire,
+            chassis_cmd_send.vision_is_tracking, bridge_cmd_fresh,
+            regular_bridge_state.last_valid_mask);
     cmd_last_telemetry_ms = now_ms;
   }
 }
@@ -575,9 +679,15 @@ static void ApplyRobotStopOutputs(void) {
   shoot_cmd_send.friction_mode = FRICTION_OFF;
   shoot_cmd_send.load_mode = LOAD_STOP;
   shoot_cmd_send.shoot_rate = CMD_SAFE_SHOOT_RATE;
+  shoot_cmd_send.rest_heat = 0U;
 
   vision_cmd_send.vision_mode = VISION_MODE_OFF;
   vision_cmd_send.allow_auto_fire = 0U;
+  cmd_rest_heat_filtered = 0.0f;
+  HeatGateReset(&cmd_heat_gate, 0.0f, 0.0f, 0.0f,
+                (uint32_t)DWT_GetTimeline_ms());
+  ResetManualHeatGateState((uint32_t)DWT_GetTimeline_ms());
+  cmd_heat_snapshot_valid = 0U;
 }
 
 static void UpdateRobotSafetyState(void) {
@@ -614,6 +724,11 @@ static void UpdateRobotSafetyState(void) {
 }
 
 static void PublishImageTelemetrySummary(void) {
+  const loader_mode_e ui_load_mode =
+      (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM)
+          ? LOAD_1_BULLET
+          : ui_loader_mode_selected;
+  const float ui_required_heat = GetRequiredHeatForLoadMode(ui_load_mode);
   chassis_cmd_send.vision_is_tracking =
       (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM &&
        vision_data_recv.vision_takeover && vision_data_recv.target_locked)
@@ -634,9 +749,8 @@ static void PublishImageTelemetrySummary(void) {
       (vision_cmd_send.vision_mode == VISION_MODE_AUTO_AIM) ? 1U : 0U;
   chassis_cmd_send.ui_fire_allow =
       (shoot_cmd_send.shoot_mode == SHOOT_ON &&
-       shoot_cmd_send.friction_mode == FRICTION_ON &&
-       !cmd_force_safe_fire &&
-       ((float)shoot_cmd_send.rest_heat >= CMD_MIN_REST_HEAT_TO_FIRE) &&
+       shoot_cmd_send.friction_mode == FRICTION_ON && !cmd_force_safe_fire &&
+       (cmd_rest_heat_filtered >= ui_required_heat) && (ui_required_heat > 0.0f) &&
        (shoot_fetch_data.loader_jam_state == 0U))
           ? 1U
           : 0U;
@@ -702,6 +816,7 @@ void RobotCMDInit() {
   // 初始化视觉控制指令
   vision_cmd_send.vision_mode = VISION_MODE_OFF; // 默认关闭视觉控制
   vision_cmd_send.allow_auto_fire = 0;           // 默认禁止自动射击
+  vision_cmd_send.bullet_speed_limit = 0.0f;     // 默认弹速为0，严格透传当前值
   vision_cmd_send.manual_yaw_offset = 0.0f;      // 无手动微调
   vision_cmd_send.manual_pitch_offset = 0.0f;
 
@@ -732,12 +847,19 @@ void RobotCMDInit() {
   cmd_force_safe_fire = 1U;
   cmd_rest_heat_filtered = 0.0f;
   cmd_shoot_rate_ff = CMD_SAFE_SHOOT_RATE;
+  HeatGateInit(&cmd_heat_gate, HEAT_PER_SHOT_D);
+  ResetManualHeatGateState((uint32_t)DWT_GetTimeline_ms());
+  cmd_heat_snapshot_valid = 0U;
+  cmd_last_barrel_heat = 0U;
+  cmd_last_barrel_heat_limit = 0U;
+  cmd_last_barrel_cooling_value = 0U;
+  cmd_last_rest_heat_raw = 0U;
   cmd_unlock_prev_safe_hold = 0U;
   cmd_ui_refresh_trigger_prev = 0U;
   keyboard_power_mode_selected = CHASSIS_POWER_LIMIT_PERCENT;
   keyboard_load_mode_selected = LOAD_STOP;
   ui_loader_mode_selected = LOAD_STOP;
-  keyboard_rotate_mode_enabled = 0U;
+  keyboard_chassis_mode_selected = CHASSIS_FOLLOW_GIMBAL_YAW;
   ResetCmdInputActive();
 
   robot_state = ROBOT_STOP; // 上电默认安全停机，必须执行显式解锁动作
@@ -913,6 +1035,8 @@ static void MouseKeySet() {
   float target_vx, target_vy;
   static uint32_t keyboard_ramp_dwt_cnt = 0U;
   static uint8_t keyboard_ramp_dt_synced = 0U;
+  static loader_mode_e mouse_pulse_load_mode = LOAD_STOP;
+  static uint32_t mouse_pulse_start_ms = 0U;
   float dt = 0.0f;
 
   /* 键鼠斜坡规划使用真实控制周期，避免手写固定dt导致参数与实际调度失配。
@@ -1032,18 +1156,29 @@ static void MouseKeySet() {
   }
   chassis_cmd_send.chassis_speed_buff = keyboard_power_mode_selected;
 
-  // G 键切换小陀螺开关，采用“按一下切换一次”的锁存语义。
-  static uint8_t rotate_key_count_g_last = 0U;
-  if (cmd_input_active.key_count[KEY_PRESS][Key_G] != rotate_key_count_g_last) {
-    keyboard_rotate_mode_enabled = keyboard_rotate_mode_enabled ? 0U : 1U;
-    rotate_key_count_g_last = cmd_input_active.key_count[KEY_PRESS][Key_G];
+  // Q/B/G 直达选择底盘模式，按一下锁定当前模式。
+  // Q = 不跟随，B = 跟随云台，G = 小陀螺。
+  static uint8_t chassis_mode_key_count_q_last = 0U;
+  static uint8_t chassis_mode_key_count_b_last = 0U;
+  static uint8_t chassis_mode_key_count_g_last = 0U;
+  if (cmd_input_active.key_count[KEY_PRESS][Key_Q] !=
+      chassis_mode_key_count_q_last) {
+    keyboard_chassis_mode_selected = CHASSIS_NO_FOLLOW;
+    chassis_mode_key_count_q_last = cmd_input_active.key_count[KEY_PRESS][Key_Q];
+  }
+  if (cmd_input_active.key_count[KEY_PRESS][Key_B] !=
+      chassis_mode_key_count_b_last) {
+    keyboard_chassis_mode_selected = CHASSIS_FOLLOW_GIMBAL_YAW;
+    chassis_mode_key_count_b_last = cmd_input_active.key_count[KEY_PRESS][Key_B];
+  }
+  if (cmd_input_active.key_count[KEY_PRESS][Key_G] !=
+      chassis_mode_key_count_g_last) {
+    keyboard_chassis_mode_selected = CHASSIS_ROTATE;
+    chassis_mode_key_count_g_last = cmd_input_active.key_count[KEY_PRESS][Key_G];
   }
 
-  // 键鼠模式下控制逻辑与遥控器拨杆解耦，互不干涉
-  // 键鼠模式默认底盘跟随云台；若开启小陀螺，则切到旋转模式。
-  chassis_cmd_send.chassis_mode = keyboard_rotate_mode_enabled
-                                      ? CHASSIS_ROTATE
-                                      : CHASSIS_FOLLOW_GIMBAL_YAW;
+  // 键鼠模式下控制逻辑与遥控器拨杆解耦，底盘模式由 Q/B/G 三态锁存决定。
+  chassis_cmd_send.chassis_mode = keyboard_chassis_mode_selected;
   gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
   vision_cmd_send.vision_mode = VISION_MODE_OFF;
   vision_cmd_send.allow_auto_fire = 0;
@@ -1054,9 +1189,11 @@ static void MouseKeySet() {
   static uint8_t mouse_left_pressed_last = 0U;
   const uint8_t mouse_left_rising =
       (mouse_left_pressed && !mouse_left_pressed_last) ? 1U : 0U;
+  const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
   mouse_left_pressed_last = mouse_left_pressed;
 
   if (cmd_input_active.mouse.press_r) {
+    mouse_pulse_load_mode = LOAD_STOP;
     vision_cmd_send.vision_mode = VISION_MODE_AUTO_AIM;
     vision_cmd_send.allow_auto_fire = 1; // 自瞄时由视觉控制是否发射
     gimbal_cmd_send.gimbal_mode = GIMBAL_AUTOAIM_MODE;
@@ -1066,10 +1203,20 @@ static void MouseKeySet() {
   // 单发/三发采用“按下触发一次”，连发采用“按住持续发射”。
   else if (mouse_left_pressed && shoot_cmd_send.friction_mode == FRICTION_ON) {
     if (keyboard_load_mode_selected == LOAD_BURSTFIRE) {
+      mouse_pulse_load_mode = LOAD_STOP;
       shoot_cmd_send.load_mode = LOAD_BURSTFIRE;
     } else if (mouse_left_rising) {
-      shoot_cmd_send.load_mode = keyboard_load_mode_selected;
+      mouse_pulse_load_mode = keyboard_load_mode_selected;
+      mouse_pulse_start_ms = now_ms;
+      shoot_cmd_send.load_mode = mouse_pulse_load_mode;
+    } else if (mouse_pulse_load_mode != LOAD_STOP &&
+               (now_ms - mouse_pulse_start_ms) < CMD_MOUSE_FIRE_PULSE_HOLD_MS) {
+      shoot_cmd_send.load_mode = mouse_pulse_load_mode;
+    } else {
+      mouse_pulse_load_mode = LOAD_STOP;
     }
+  } else {
+    mouse_pulse_load_mode = LOAD_STOP;
   }
 
   switch (cmd_input_active.key[KEY_PRESS]
@@ -1241,23 +1388,25 @@ void RobotCMDTask() {
   UpdateRegularBridgeState();
   SelectActiveControlInput();
   UpdateUIRefreshRequest();
+  vision_cmd_send.bullet_speed_limit =
+      chassis_fetch_data.bullet_speed_limit;
 
   // 最高优先级：先同步安全状态，再决定是否继续执行控制逻辑
   EmergencyHandler();
   if (robot_state != ROBOT_READY) {
 
 #ifdef ONE_BOARD
-  PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
+    PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
-  if (cmd_can_comm != NULL) {
-    CANCommSend(cmd_can_comm, (void *)&chassis_cmd_send);
-  }
+    if (cmd_can_comm != NULL) {
+      CANCommSend(cmd_can_comm, (void *)&chassis_cmd_send);
+    }
 #endif // GIMBAL_BOARD
-  PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
-  PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
-  PubPushMessage(vision_cmd_pub, (void *)&vision_cmd_send);
-  return;
+    PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
+    PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
+    PubPushMessage(vision_cmd_pub, (void *)&vision_cmd_send);
+    return;
   }
 
   // 计算云台-底盘角度关系（offset_angle 和 near_center_error）

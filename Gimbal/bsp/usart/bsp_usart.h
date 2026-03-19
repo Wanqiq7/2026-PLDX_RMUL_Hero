@@ -130,6 +130,9 @@ uint8_t USARTIsReady(USARTInstance *_instance);
 
 USART_Status_e USARTRead(USARTInstance *_instance, uint8_t *recv_buf, uint16_t recv_size,
                          USART_Operation_s *operation, uint8_t in_isr);
+USART_Status_e USARTReadAvailable(USARTInstance *_instance, uint8_t *recv_buf,
+                                  uint16_t recv_size, uint16_t *actual_size,
+                                  uint8_t in_isr);
 USART_Status_e USARTWrite(USARTInstance *_instance, const uint8_t *send_buf,
                           uint16_t send_size, USART_Operation_s *operation,
                           uint8_t in_isr);

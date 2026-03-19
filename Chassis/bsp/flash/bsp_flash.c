@@ -10,12 +10,6 @@ static uint32_t ger_sector(uint32_t address);
   * @param[in]      len: page num
   * @retval         none
   */
-/**
-  * @brief          擦除flash
-  * @param[in]      address: flash 地址
-  * @param[in]      len: 页数量
-  * @retval         none
-  */
 void flash_erase_address(uint32_t address, uint16_t len)
 {
     FLASH_EraseInitTypeDef flash_erase;
@@ -36,13 +30,6 @@ void flash_erase_address(uint32_t address, uint16_t len)
   * @param[in]      start_address: flash address
   * @param[in]      buf: data point
   * @param[in]      len: data num
-  * @retval         success 0, fail -1
-  */
-/**
-  * @brief          往一页flash写数据
-  * @param[in]      start_address: flash 地址
-  * @param[in]      buf: 数据指针
-  * @param[in]      len: 数据长度
   * @retval         success 0, fail -1
   */
 int8_t flash_write_single_address(uint32_t start_address, uint32_t *buf, uint32_t len)
@@ -91,14 +78,6 @@ int8_t flash_write_single_address(uint32_t start_address, uint32_t *buf, uint32_
   * @param[in]      len: data num
   * @retval         success 0, fail -1
   */
-/**
-  * @brief          往几页flash写数据
-  * @param[in]      start_address: flash 开始地址
-  * @param[in]      end_address: flash 结束地址
-  * @param[in]      buf: 数据指针
-  * @param[in]      len: 数据长度
-  * @retval         success 0, fail -1
-  */
 int8_t flash_write_muli_address(uint32_t start_address, uint32_t end_address, uint32_t *buf, uint32_t len)
 {
     uint32_t uw_address = 0;
@@ -141,13 +120,6 @@ int8_t flash_write_muli_address(uint32_t start_address, uint32_t end_address, ui
   * @param[in]      len: data num
   * @retval         none
   */
-/**
-  * @brief          从flash读数据
-  * @param[in]      start_address: flash 地址
-  * @param[out]     buf: 数据指针
-  * @param[in]      len: 数据长度
-  * @retval         none
-  */
 void flash_read(uint32_t address, uint32_t *buf, uint32_t len)
 {
     memcpy(buf, (void*)address, len *4);
@@ -158,11 +130,6 @@ void flash_read(uint32_t address, uint32_t *buf, uint32_t len)
   * @brief          get the sector number of flash
   * @param[in]      address: flash address
   * @retval         sector number
-  */
-/**
-  * @brief          获取flash的sector号
-  * @param[in]      address: flash 地址
-  * @retval         sector号
   */
 static uint32_t ger_sector(uint32_t address)
 {
@@ -229,9 +196,9 @@ static uint32_t ger_sector(uint32_t address)
   * @retval         next page flash address
   */
 /**
-  * @brief          获取下一页flash地址
-  * @param[in]      address: flash 地址
-  * @retval         下一页flash地址
+  * @brief          鑾峰彇涓嬩竴椤礷lash鍦板潃
+  * @param[in]      address: flash 鍦板潃
+  * @retval         涓嬩竴椤礷lash鍦板潃
   */
 uint32_t get_next_flash_address(uint32_t address)
 {

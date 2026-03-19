@@ -75,9 +75,10 @@ uint8_t VTMInputIsOnline(void);
 const VTM_Input_Data_s *VTMInputGetData(void);
 
 /**
- * @brief 推进官方图传输入串口显式读取流程
+ * @brief 推进官方图传输入串口流式解析流程
  *
- * @note 需要在任务上下文中周期调用,避免在 UART ISR 中直接做帧校验与键位解析
+ * @note 需要在任务上下文中周期调用,由模块内部在软件 FIFO 上做找头、拼帧、
+ *       CRC 校验与自恢复，避免在 UART ISR 中直接做协议解析
  */
 void VTMInputProcess(void);
 

@@ -16,7 +16,7 @@
 void BSPInit()
 {
     DWT_Init(168);
-    BSPLogInit();
+    //BSPLogInit();
 }
 
 

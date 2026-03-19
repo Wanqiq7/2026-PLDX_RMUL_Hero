@@ -152,8 +152,8 @@ void VisionAppTask(void) {
 
   // 更新发送给视觉的模式与弹速（姿态由 INS_Task 1kHz 推送）
   VisionUpdateTxAux(VisionModeToProtocol(vision_cmd_recv.vision_mode),
-                    12.0f,
-                    vision_bullet_count);
+                    vision_cmd_recv.bullet_speed_limit,
+                    vision_bullet_count); 
 
   // 检查视觉在线状态
   uint8_t vision_online = VisionIsOnline();

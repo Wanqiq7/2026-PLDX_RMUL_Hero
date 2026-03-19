@@ -107,7 +107,6 @@ void MyUIInit()
         LOGWARNING("[ref_ui] robot_id unavailable, disable gimbal UI task");
         vTaskDelete(NULL);
     }
-
     DeterminRobotID();                                            // 确定ui要发送到的目标客户端
     UIDelete(&referee_recv_info->referee_id, UI_Data_Del_ALL, 0); // 清空UI
 

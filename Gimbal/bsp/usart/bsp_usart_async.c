@@ -503,6 +503,52 @@ USART_Status_e USARTAsyncRead(USART_Read_Port_s *port, uint8_t *recv_buf,
     return USART_STATUS_TIMEOUT;
 }
 
+USART_Status_e USARTAsyncReadPortReadAvailable(USART_Read_Port_s *port,
+                                               uint8_t *recv_buf,
+                                               uint16_t recv_size,
+                                               uint16_t *actual_size,
+                                               uint8_t in_isr)
+{
+    UBaseType_t critical_state;
+    uint16_t readable_size;
+    uint16_t consume_size;
+
+    if (actual_size == NULL || port == NULL || (recv_buf == NULL && recv_size > 0U))
+        return USART_STATUS_INVALID_PARAM;
+
+    *actual_size = 0U;
+
+    if (recv_size == 0U)
+        return USART_STATUS_OK;
+
+    if (port->busy != USART_READ_PORT_IDLE && port->busy != USART_READ_PORT_EVENT)
+        return USART_STATUS_BUSY;
+
+    critical_state = USARTEnterCritical(in_isr);
+    readable_size = port->queue_data.size;
+    if (readable_size == 0U)
+    {
+        if (port->busy == USART_READ_PORT_EVENT)
+            port->busy = USART_READ_PORT_IDLE;
+        USARTExitCritical(in_isr, critical_state);
+        return USART_STATUS_EMPTY;
+    }
+
+    consume_size = (readable_size < recv_size) ? readable_size : recv_size;
+    for (uint16_t i = 0U; i < consume_size; ++i)
+    {
+        recv_buf[i] = port->queue_data.buffer[port->queue_data.tail];
+        port->queue_data.tail =
+            (uint16_t)((port->queue_data.tail + 1U) % port->queue_data.capacity);
+    }
+    port->queue_data.size = (uint16_t)(port->queue_data.size - consume_size);
+    if (port->queue_data.size == 0U && port->busy == USART_READ_PORT_EVENT)
+        port->busy = USART_READ_PORT_IDLE;
+    *actual_size = consume_size;
+    USARTExitCritical(in_isr, critical_state);
+    return USART_STATUS_OK;
+}
+
 USART_Status_e USARTAsyncReadPortPushBytes(USART_Read_Port_s *port,
                                            const uint8_t *data, uint16_t length,
                                            uint8_t in_isr)

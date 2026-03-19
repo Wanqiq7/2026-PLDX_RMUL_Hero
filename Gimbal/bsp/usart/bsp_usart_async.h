@@ -102,6 +102,11 @@ uint16_t USARTAsyncWritePortEmptySize(const USART_Write_Port_s *port);
 USART_Status_e USARTAsyncRead(USART_Read_Port_s *port, uint8_t *recv_buf,
                               uint16_t recv_size, USART_Operation_s *operation,
                               uint8_t in_isr);
+USART_Status_e USARTAsyncReadPortReadAvailable(USART_Read_Port_s *port,
+                                               uint8_t *recv_buf,
+                                               uint16_t recv_size,
+                                               uint16_t *actual_size,
+                                               uint8_t in_isr);
 USART_Status_e USARTAsyncReadPortPushBytes(USART_Read_Port_s *port,
                                            const uint8_t *data, uint16_t length,
                                            uint8_t in_isr);

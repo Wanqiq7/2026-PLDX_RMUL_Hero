@@ -262,6 +262,17 @@ USART_Status_e USARTRead(USARTInstance *_instance, uint8_t *recv_buf,
     return USARTAsyncRead(_instance->read_port, recv_buf, recv_size, operation, in_isr);
 }
 
+USART_Status_e USARTReadAvailable(USARTInstance *_instance, uint8_t *recv_buf,
+                                  uint16_t recv_size, uint16_t *actual_size,
+                                  uint8_t in_isr)
+{
+    if (_instance == NULL || _instance->read_port == NULL)
+        return USART_STATUS_INVALID_PARAM;
+
+    return USARTAsyncReadPortReadAvailable(_instance->read_port, recv_buf, recv_size,
+                                           actual_size, in_isr);
+}
+
 USART_Status_e USARTWrite(USARTInstance *_instance, const uint8_t *send_buf,
                           uint16_t send_size, USART_Operation_s *operation,
                           uint8_t in_isr)

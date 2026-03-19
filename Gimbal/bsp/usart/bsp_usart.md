@@ -14,6 +14,7 @@
   旧模块仍可通过 `recv_buff + module_callback(size)` 工作，但这条路径只适用于**固定帧**协议。
 - 推荐路径：
   新模块应使用 `USARTRead()` / `USARTWrite()` 与 `BLOCK/CALLBACK/POLLING` 操作模型，不再依赖直接访问 `recv_buff`。
+  若协议层需要自行做流式拼帧，应使用只消费当前 FIFO 的非挂起接口，而不是对局部变量发起 pending read。
 
 ## 分层约束
 
@@ -137,6 +138,19 @@ if (USARTRead(usart_instance, recv_buf, expect_len, &op, 0U) == USART_STATUS_PEN
 }
 ```
 
+### 新模块使用当前 FIFO 的非挂起消费接口
+
+```c
+uint8_t data[16];
+uint16_t actual_size = 0U;
+
+if (USARTReadAvailable(usart_instance, data, sizeof(data), &actual_size, 0U) ==
+        USART_STATUS_OK &&
+    actual_size > 0U) {
+    // 任务上下文消费当前 FIFO 中已有字节
+}
+```
+
 ### 新模块发送
 
 ```c
@@ -150,7 +164,7 @@ USARTWrite(usart_instance, send_buf, send_len, &op, 0U);
 - fixed-length 模块：
   短期保留 legacy callback，先把 `USART_Init_Config_s` 改为零初始化
 - 图传官方输入：
-  当前 `vtm_input` 已走 `USARTRead(..., POLLING)` 路径；若第一阶段修复后仍不能稳定收满 21 字节，再考虑升级为流式拼帧解析
+  当前 `vtm_input` 已升级为流式拼帧解析，协议层使用持久化 parser context 自行找 `A9 53`、累积 21 字节并校验 CRC
 - 裁判系统图传链路：
   已迁移为任务上下文中的流式状态机，不再在 UART ISR 内解包
 

@@ -70,10 +70,34 @@ static float loader_jam_state_since_ms = 0.0f;
 static float loader_jam_process_start_ms = 0.0f;
 static float loader_jam_process_target_angle = 0.0f;
 static uint16_t loader_jam_recovery_count = 0U;
+static uint8_t loader_discrete_shot_active = 0U;
+static loader_mode_e loader_discrete_shot_mode = LOAD_STOP;
+static float loader_discrete_shot_target_angle = 0.0f;
 
 static uint8_t IsLoaderFireIntent(loader_mode_e load_mode) {
   return (load_mode == LOAD_1_BULLET || load_mode == LOAD_3_BULLET ||
           load_mode == LOAD_BURSTFIRE)
+             ? 1U
+             : 0U;
+}
+
+static float GetLoaderDiscreteShotDeltaAngle(loader_mode_e load_mode) {
+  return (load_mode == LOAD_3_BULLET) ? (3.0f * ONE_BULLET_DELTA_ANGLE)
+                                      : ONE_BULLET_DELTA_ANGLE;
+}
+
+static void ClearLoaderDiscreteShot(void) {
+  loader_discrete_shot_active = 0U;
+  loader_discrete_shot_mode = LOAD_STOP;
+  loader_discrete_shot_target_angle = 0.0f;
+}
+
+static uint8_t IsLoaderDiscreteShotFinished(void) {
+  const float angle_error =
+      fabsf(loader_discrete_shot_target_angle - loader->measure.total_angle);
+  const float abs_speed = fabsf(loader->measure.speed_aps);
+  return (angle_error <= LOADER_JAM_TARGET_TOLERANCE_ANGLE &&
+          abs_speed <= LOADER_JAM_SPEED_THRESHOLD_DPS)
              ? 1U
              : 0U;
 }
@@ -329,6 +353,8 @@ void ShootInit() // 已适配三摩擦轮发射机构（倒三角布局）
 /* 机器人发射机构控制核心任务 */
 void ShootTask() {
   const float now_ms = DWT_GetTimeline_ms();
+  loader_mode_e requested_load_mode = LOAD_STOP;
+  loader_mode_e effective_load_mode = LOAD_STOP;
   // 从cmd获取控制数据
   SubGetMessage(shoot_sub, &shoot_cmd_recv);
 
@@ -349,16 +375,26 @@ void ShootTask() {
     loader_reverse_active = 0;
     loader_reverse_start_time_ms = 0.0f;
     loader_reverse_cooldown_until = 0.0f;
+    ClearLoaderDiscreteShot();
     ResetLoaderJamState(now_ms, 0U);
 
     PublishShootFeedback();
     return; // 紧急停止后直接返回，不再执行后续逻辑
   }
 
-  const uint8_t manual_reverse =
-      (shoot_cmd_recv.load_mode == LOAD_REVERSE) ? 1U : 0U;
-  const uint8_t fire_intent = IsLoaderFireIntent(shoot_cmd_recv.load_mode);
-  const uint8_t deadtime_blocked = (shoot_cmd_recv.load_mode != LOAD_STOP) &&
+  requested_load_mode = shoot_cmd_recv.load_mode;
+  if (loader_discrete_shot_active &&
+      (requested_load_mode == LOAD_REVERSE ||
+       requested_load_mode == LOAD_BURSTFIRE)) {
+    ClearLoaderDiscreteShot();
+  }
+
+  effective_load_mode =
+      loader_discrete_shot_active ? loader_discrete_shot_mode : requested_load_mode;
+
+  const uint8_t manual_reverse = (requested_load_mode == LOAD_REVERSE) ? 1U : 0U;
+  const uint8_t fire_intent = IsLoaderFireIntent(effective_load_mode);
+  const uint8_t deadtime_blocked = (effective_load_mode != LOAD_STOP) &&
                                    !manual_reverse &&
                                    (hibernate_time + dead_time > now_ms);
   uint8_t loader_control_taken = 0U;
@@ -382,41 +418,43 @@ void ShootTask() {
 
   if (!loader_control_taken) {
     // 若不在休眠状态,根据robotCMD传来的控制模式进行拨盘电机参考值设定和模式切换
-    switch (shoot_cmd_recv.load_mode) {
+    switch (effective_load_mode) {
     case LOAD_STOP:
       // 直接停止电机，同时重置PID状态（见DJIMotorStop实现）
       DJIMotorStop(loader);
+      ClearLoaderDiscreteShot();
       ResetLoaderJamState(now_ms, 0U);
       break;
 
     case LOAD_1_BULLET:                      // 激活能量机关/干扰对方用,英雄用.
-      DJIMotorEnable(loader);                // 从STOP切换过来时需要使能
-      DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到角度环
-      // 基于当前实际角度设定目标，避免停止期间位置漂移导致反转
-      DJIMotorSetRef(loader,
-                     loader->measure.total_angle + ONE_BULLET_DELTA_ANGLE);
-      hibernate_time = now_ms; // 记录触发指令的时间
-      shoot_time = hibernate_time;
-      shoot_speed = shoot_cmd_recv.shoot_rate;
-      dead_time = (shoot_cmd_recv.shoot_rate > 0.0f)
-                      ? (1000.0f / shoot_cmd_recv.shoot_rate)
-                      : 1000.0f;
-      break;
-
     case LOAD_3_BULLET:
+      if (!loader_discrete_shot_active) {
+        loader_discrete_shot_active = 1U;
+        loader_discrete_shot_mode = effective_load_mode;
+        loader_discrete_shot_target_angle =
+            loader->measure.total_angle +
+            GetLoaderDiscreteShotDeltaAngle(effective_load_mode);
+        hibernate_time = now_ms; // 记录触发指令的时间
+        shoot_time = hibernate_time;
+        shoot_speed = shoot_cmd_recv.shoot_rate;
+        dead_time =
+            (shoot_cmd_recv.shoot_rate > 0.0f)
+                ? (GetLoaderDiscreteShotDeltaAngle(effective_load_mode) /
+                   ONE_BULLET_DELTA_ANGLE) *
+                      (1000.0f / shoot_cmd_recv.shoot_rate)
+                : ((effective_load_mode == LOAD_3_BULLET) ? 300.0f : 1000.0f);
+      }
       DJIMotorEnable(loader);                // 从STOP切换过来时需要使能
       DJIMotorOuterLoop(loader, ANGLE_LOOP); // 切换到角度环
-      DJIMotorSetRef(loader, loader->measure.total_angle +
-                                 3.0f * ONE_BULLET_DELTA_ANGLE);
-      hibernate_time = now_ms; // 记录触发指令的时间
-      shoot_time = hibernate_time;
-      shoot_speed = shoot_cmd_recv.shoot_rate;
-      dead_time = (shoot_cmd_recv.shoot_rate > 0.0f)
-                      ? (3.0f * (1000.0f / shoot_cmd_recv.shoot_rate))
-                      : 300.0f;
+      DJIMotorSetRef(loader, loader_discrete_shot_target_angle);
+      if (IsLoaderDiscreteShotFinished()) {
+        ClearLoaderDiscreteShot();
+        DJIMotorStop(loader);
+      }
       break;
 
     case LOAD_BURSTFIRE:
+      ClearLoaderDiscreteShot();
       DJIMotorEnable(loader);                // 从STOP切换过来时需要重新使能
       DJIMotorOuterLoop(loader, SPEED_LOOP); // 必须切换到速度环
 
@@ -436,7 +474,7 @@ void ShootTask() {
 
     default:
       LOGERROR("[shoot] Invalid load_mode=%d, fallback to LOAD_STOP.",
-               (int)shoot_cmd_recv.load_mode);
+               (int)effective_load_mode);
       shoot_cmd_recv.load_mode = LOAD_STOP;
       hibernate_time = 0.0f;
       dead_time = 0.0f;
@@ -446,6 +484,7 @@ void ShootTask() {
       loader_reverse_active = 0U;
       loader_reverse_start_time_ms = 0.0f;
       loader_reverse_cooldown_until = 0.0f;
+      ClearLoaderDiscreteShot();
       ResetLoaderJamState(now_ms, 0U);
       DJIMotorStop(loader);
       break;

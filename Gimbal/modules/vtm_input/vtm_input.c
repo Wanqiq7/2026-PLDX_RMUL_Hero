@@ -15,15 +15,84 @@ static USARTInstance *vtm_input_usart_instance;
 static DaemonInstance *vtm_input_daemon_instance;
 static uint8_t vtm_input_init_flag = 0u;
 
+typedef enum {
+  VTM_INPUT_RX_WAIT_HEADER_0 = 0u,
+  VTM_INPUT_RX_WAIT_HEADER_1,
+  VTM_INPUT_RX_WAIT_REST,
+} VTM_Input_Rx_State_e;
+
 typedef struct
 {
   uint8_t read_pending;
   uint8_t frame_buffer[VTM_INPUT_FRAME_SIZE];
+  uint8_t frame_index;
+  uint8_t parser_state;
+  uint16_t last_chunk_size;
+  USART_Status_e last_read_status;
   volatile USART_Polling_Status_e polling_status;
-  USART_Operation_s polling_operation;
 } VTM_Input_Rx_Context_s;
 
 static VTM_Input_Rx_Context_s vtm_input_rx_context;
+
+static void VTMInputResetParserState(void) {
+  memset(vtm_input_rx_context.frame_buffer, 0, sizeof(vtm_input_rx_context.frame_buffer));
+  vtm_input_rx_context.frame_index = 0u;
+  vtm_input_rx_context.parser_state = VTM_INPUT_RX_WAIT_HEADER_0;
+  vtm_input_rx_context.read_pending = 0u;
+}
+
+static uint8_t VTMInputConsumeByte(uint8_t byte) {
+  switch ((VTM_Input_Rx_State_e)vtm_input_rx_context.parser_state) {
+  case VTM_INPUT_RX_WAIT_HEADER_0:
+    if (byte == VTM_INPUT_HEADER_0) {
+      vtm_input_rx_context.frame_buffer[0] = byte;
+      vtm_input_rx_context.frame_index = 1u;
+      vtm_input_rx_context.parser_state = VTM_INPUT_RX_WAIT_HEADER_1;
+      vtm_input_rx_context.read_pending = 1u;
+    }
+    return 0u;
+
+  case VTM_INPUT_RX_WAIT_HEADER_1:
+    if (byte == VTM_INPUT_HEADER_1) {
+      vtm_input_rx_context.frame_buffer[1] = byte;
+      vtm_input_rx_context.frame_index = 2u;
+      vtm_input_rx_context.parser_state = VTM_INPUT_RX_WAIT_REST;
+      vtm_input_rx_context.read_pending = 1u;
+    } else if (byte == VTM_INPUT_HEADER_0) {
+      vtm_input_rx_context.frame_buffer[0] = byte;
+      vtm_input_rx_context.frame_index = 1u;
+      vtm_input_rx_context.parser_state = VTM_INPUT_RX_WAIT_HEADER_1;
+      vtm_input_rx_context.read_pending = 1u;
+      vtm_input_data[VTM_INPUT_TEMP].short_frame_count++;
+    } else {
+      vtm_input_data[VTM_INPUT_TEMP].short_frame_count++;
+      VTMInputResetParserState();
+    }
+    return 0u;
+
+  case VTM_INPUT_RX_WAIT_REST:
+    if (vtm_input_rx_context.frame_index >= VTM_INPUT_FRAME_SIZE) {
+      vtm_input_data[VTM_INPUT_TEMP].short_frame_count++;
+      VTMInputResetParserState();
+      return 0u;
+    }
+
+    vtm_input_rx_context.frame_buffer[vtm_input_rx_context.frame_index++] = byte;
+    vtm_input_rx_context.read_pending = 1u;
+    if (vtm_input_rx_context.frame_index == VTM_INPUT_FRAME_SIZE) {
+      vtm_input_rx_context.read_pending = 0u;
+      vtm_input_rx_context.parser_state = VTM_INPUT_RX_WAIT_HEADER_0;
+      vtm_input_rx_context.frame_index = 0u;
+      return 1u;
+    }
+    return 0u;
+
+  default:
+    vtm_input_data[VTM_INPUT_TEMP].short_frame_count++;
+    VTMInputResetParserState();
+    return 0u;
+  }
+}
 
 static const uint16_t vtm_crc16_tab[256] = {
     0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
@@ -317,7 +386,9 @@ static void VTMInputParseFrame(const uint8_t *frame) {
 
 static void VTMInputResetRxContext(void) {
   memset(&vtm_input_rx_context, 0, sizeof(vtm_input_rx_context));
+  vtm_input_rx_context.last_read_status = USART_STATUS_OK;
   vtm_input_rx_context.polling_status = USART_POLLING_READY;
+  VTMInputResetParserState();
 }
 
 /**
@@ -356,12 +427,20 @@ VTM_Input_Data_s *VTMInputInit(UART_HandleTypeDef *usart_handle) {
   usart_config.tx_fifo_size = 64U;
   usart_config.tx_queue_depth = 4U;
   vtm_input_usart_instance = USARTRegister(&usart_config);
+  if (vtm_input_usart_instance == NULL) {
+    LOGERROR("[vtm_input] USARTRegister failed");
+    return NULL;
+  }
   VTMInputResetRxContext();
 
   daemon_config.reload_count = 10u;
   daemon_config.callback = VTMInputLostCallback;
   daemon_config.owner_id = NULL;
   vtm_input_daemon_instance = DaemonRegister(&daemon_config);
+  if (vtm_input_daemon_instance == NULL) {
+    LOGERROR("[vtm_input] DaemonRegister failed");
+    return NULL;
+  }
 
   vtm_input_init_flag = 1u;
   return &vtm_input_data[VTM_INPUT_TEMP];
@@ -385,35 +464,45 @@ const VTM_Input_Data_s *VTMInputGetData(void) {
 
 void VTMInputProcess(void) {
   USART_Status_e status;
+  uint8_t fifo_chunk[32];
+  uint16_t actual_size = 0u;
+  uint8_t frame_completed = 0u;
 
   if (!vtm_input_init_flag || vtm_input_usart_instance == NULL) {
     return;
   }
 
-  if (vtm_input_rx_context.read_pending == 0u) {
-    USARTOperationInitPolling(&vtm_input_rx_context.polling_operation,
-                              &vtm_input_rx_context.polling_status);
-    status = USARTRead(vtm_input_usart_instance, vtm_input_rx_context.frame_buffer,
-                       VTM_INPUT_FRAME_SIZE, &vtm_input_rx_context.polling_operation,
-                       0U);
-    if (status == USART_STATUS_OK) {
-      vtm_input_rx_context.polling_status = USART_POLLING_DONE;
-      vtm_input_rx_context.read_pending = 1u;
-    } else if (status == USART_STATUS_PENDING) {
-      vtm_input_rx_context.read_pending = 1u;
-    } else {
-      vtm_input_rx_context.read_pending = 0u;
-      vtm_input_rx_context.polling_status = USART_POLLING_ERROR;
-    }
-  }
+  while (1) {
+    status = USARTReadAvailable(vtm_input_usart_instance, fifo_chunk,
+                                (uint16_t)sizeof(fifo_chunk), &actual_size, 0U);
+    vtm_input_rx_context.last_read_status = status;
+    vtm_input_rx_context.last_chunk_size = actual_size;
 
-  if (vtm_input_rx_context.read_pending != 0u &&
-      vtm_input_rx_context.polling_status == USART_POLLING_DONE) {
-    vtm_input_data[VTM_INPUT_TEMP].last_rx_size = VTM_INPUT_FRAME_SIZE;
-    VTMInputParseFrame(vtm_input_rx_context.frame_buffer);
-    vtm_input_rx_context.read_pending = 0u;
-    vtm_input_rx_context.polling_status = USART_POLLING_READY;
-  } else if (vtm_input_rx_context.polling_status == USART_POLLING_ERROR) {
-    VTMInputResetRxContext();
+    if (status == USART_STATUS_EMPTY || actual_size == 0u) {
+      if (frame_completed != 0u) {
+        vtm_input_rx_context.polling_status = USART_POLLING_DONE;
+      } else if (vtm_input_rx_context.read_pending != 0u) {
+        vtm_input_rx_context.polling_status = USART_POLLING_RUNNING;
+      } else {
+        vtm_input_rx_context.polling_status = USART_POLLING_READY;
+      }
+      return;
+    }
+
+    if (status != USART_STATUS_OK) {
+      vtm_input_rx_context.polling_status = USART_POLLING_ERROR;
+      return;
+    }
+
+    vtm_input_rx_context.polling_status = USART_POLLING_RUNNING;
+    for (uint16_t i = 0u; i < actual_size; ++i) {
+      if (VTMInputConsumeByte(fifo_chunk[i]) != 0u) {
+        vtm_input_data[VTM_INPUT_TEMP].last_rx_size = VTM_INPUT_FRAME_SIZE;
+        VTMInputParseFrame(vtm_input_rx_context.frame_buffer);
+        frame_completed = 1u;
+        memset(vtm_input_rx_context.frame_buffer, 0,
+               sizeof(vtm_input_rx_context.frame_buffer));
+      }
+    }
   }
 }
