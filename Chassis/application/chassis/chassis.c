@@ -115,7 +115,10 @@ static const Chassis_Runtime_Config_t chassis_config = {
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
 #include "can_comm.h"
 #include "ins_task.h"
-static CANCommInstance *chasiss_can_comm; // 双板通信CAN comm
+static CANCommInstance *chassis_can_fast_comm;
+static CANCommInstance *chassis_can_state_comm;
+static CANCommInstance *chassis_can_ui_comm;
+static CANCommInstance *chassis_can_event_comm;
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
 #ifdef ONE_BOARD
@@ -124,11 +127,18 @@ static Subscriber_t *chassis_sub;                    // 用于订阅底盘的控
 #endif                                               // !ONE_BOARD
 static Chassis_Ctrl_Cmd_s chassis_cmd_recv;          // 底盘接收到的控制命令
 static Chassis_Upload_Data_s chassis_feedback_data;  // 底盘回传的反馈数据
-static ext_map_command_t regular_map_command_cache;  // 0x0303桥接缓存
-static ext_map_robot_data_t regular_map_robot_cache; // 0x0305桥接缓存
-static ext_map_path_data_t regular_map_path_cache;   // 0x0307桥接缓存
-static ext_map_robot_custom_data_t regular_map_custom_cache; // 0x0308桥接缓存
-static uint8_t regular_bridge_seq = 0;                       // 常规桥接摘要序号
+static Chassis_Ctrl_Fast_Pkt_s chassis_ctrl_fast_recv;
+static Chassis_Ctrl_State_Pkt_s chassis_ctrl_state_recv;
+static Chassis_Ctrl_UI_Pkt_s chassis_ctrl_ui_recv;
+static Chassis_Ctrl_Event_Pkt_s chassis_ctrl_event_recv;
+static Chassis_Feed_Fast_Pkt_s chassis_feed_fast_send;
+static Chassis_Feed_State_Pkt_s chassis_feed_state_send;
+static uint32_t chassis_next_fast_can_send_ms = 0U;
+static uint32_t chassis_next_state_can_send_ms = 0U;
+static const uint32_t CHASSIS_CAN_FAST_PERIOD_MS = 10U;  // 100Hz
+static const uint32_t CHASSIS_CAN_STATE_PERIOD_MS = 50U; // 20Hz
+static const uint32_t CHASSIS_CAN_FAST_PHASE_MS = 5U;
+static const uint32_t CHASSIS_CAN_STATE_PHASE_MS = 8U;
 
 static referee_info_t *referee_data; // 用于获取裁判系统的数据
 static Referee_UI_Generated_State_t
@@ -184,7 +194,6 @@ static void SyncGeneratedUIState(uint8_t comm_online, uint8_t cap_online,
   const int wild_threshold_percent = 110;
   uint16_t heat_value = 0U;
   uint16_t fire_allowance_count = 0U;
-  uint8_t fire_allow = 0U;
 
   if (chassis_feedback_data.referee_online && referee_data != NULL) {
     const uint16_t heat_limit =
@@ -193,7 +202,6 @@ static void SyncGeneratedUIState(uint8_t comm_online, uint8_t cap_online,
         referee_data->PowerHeatData.shooter_42mm_barrel_heat;
     heat_value = (heat_limit > barrel_heat) ? (heat_limit - barrel_heat) : 0U;
     fire_allowance_count = (uint16_t)(heat_value / (uint16_t)HEAT_PER_SHOT_D);
-    fire_allow = (heat_value >= (uint16_t)HEAT_PER_SHOT_D) ? 1U : 0U;
   }
 
   ui_data.chassis_online = comm_online;
@@ -216,6 +224,100 @@ static void SyncGeneratedUIState(uint8_t comm_online, uint8_t cap_online,
   } else {
     ui_data.power_mode = REFEREE_UI_POWER_NOR;
   }
+}
+
+static void UpdateChassisCommandFromCan(void) {
+#ifdef CHASSIS_BOARD
+  if (chassis_can_fast_comm != NULL && CANCommIsOnline(chassis_can_fast_comm)) {
+    memcpy(&chassis_ctrl_fast_recv, CANCommGet(chassis_can_fast_comm),
+           sizeof(chassis_ctrl_fast_recv));
+    chassis_cmd_recv.vx = chassis_ctrl_fast_recv.vx;
+    chassis_cmd_recv.vy = chassis_ctrl_fast_recv.vy;
+    chassis_cmd_recv.wz = chassis_ctrl_fast_recv.wz;
+    chassis_cmd_recv.offset_angle = chassis_ctrl_fast_recv.offset_angle;
+    chassis_cmd_recv.near_center_error = chassis_ctrl_fast_recv.near_center_error;
+    chassis_cmd_recv.chassis_mode = chassis_ctrl_fast_recv.chassis_mode;
+  } else {
+    memset(&chassis_cmd_recv, 0, sizeof(chassis_cmd_recv));
+    return;
+  }
+
+  if (chassis_can_state_comm != NULL &&
+      CANCommIsOnline(chassis_can_state_comm)) {
+    memcpy(&chassis_ctrl_state_recv, CANCommGet(chassis_can_state_comm),
+           sizeof(chassis_ctrl_state_recv));
+    chassis_cmd_recv.chassis_speed_buff =
+        chassis_ctrl_state_recv.chassis_speed_buff;
+  } else {
+    chassis_cmd_recv.chassis_speed_buff = 100;
+  }
+
+  if (chassis_can_ui_comm != NULL && CANCommIsOnline(chassis_can_ui_comm)) {
+    memcpy(&chassis_ctrl_ui_recv, CANCommGet(chassis_can_ui_comm),
+           sizeof(chassis_ctrl_ui_recv));
+    chassis_cmd_recv.ui_friction_on = chassis_ctrl_ui_recv.ui_friction_on;
+    chassis_cmd_recv.ui_autoaim_enabled =
+        chassis_ctrl_ui_recv.ui_autoaim_enabled;
+    chassis_cmd_recv.ui_fire_allow = chassis_ctrl_ui_recv.ui_fire_allow;
+    chassis_cmd_recv.ui_stuck_active = chassis_ctrl_ui_recv.ui_stuck_active;
+    chassis_cmd_recv.ui_loader_mode = chassis_ctrl_ui_recv.ui_loader_mode;
+  } else {
+    chassis_cmd_recv.ui_friction_on = 0U;
+    chassis_cmd_recv.ui_autoaim_enabled = 0U;
+    chassis_cmd_recv.ui_fire_allow = 0U;
+    chassis_cmd_recv.ui_stuck_active = 0U;
+    chassis_cmd_recv.ui_loader_mode = (uint8_t)LOAD_STOP;
+  }
+
+  if (chassis_can_event_comm != NULL) {
+    memcpy(&chassis_ctrl_event_recv, CANCommGet(chassis_can_event_comm),
+           sizeof(chassis_ctrl_event_recv));
+    chassis_cmd_recv.ui_refresh_request_seq =
+        chassis_ctrl_event_recv.ui_refresh_request_seq;
+  }
+#endif
+}
+
+static void BuildChassisFeedbackCanPackets(void) {
+  chassis_feed_fast_send.referee_online = chassis_feedback_data.referee_online;
+  chassis_feed_fast_send.rest_heat = chassis_feedback_data.rest_heat;
+  chassis_feed_fast_send.barrel_heat = chassis_feedback_data.barrel_heat;
+  chassis_feed_fast_send.barrel_heat_limit =
+      chassis_feedback_data.barrel_heat_limit;
+  chassis_feed_fast_send.barrel_cooling_value =
+      chassis_feedback_data.barrel_cooling_value;
+  chassis_feed_fast_send.bullet_speed_limit =
+      chassis_feedback_data.bullet_speed_limit;
+
+  chassis_feed_state_send.bullet_speed = chassis_feedback_data.bullet_speed;
+  chassis_feed_state_send.chassis_power_limit =
+      chassis_feedback_data.chassis_power_limit;
+}
+
+static void SendChassisFeedbackCanIfDue(void) {
+#ifdef CHASSIS_BOARD
+  const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+
+  if (chassis_can_fast_comm == NULL || chassis_can_state_comm == NULL) {
+    return;
+  }
+
+  BuildChassisFeedbackCanPackets();
+
+  if (now_ms >= chassis_next_fast_can_send_ms) {
+    CANCommSend(chassis_can_fast_comm, (void *)&chassis_feed_fast_send);
+    do {
+      chassis_next_fast_can_send_ms += CHASSIS_CAN_FAST_PERIOD_MS;
+    } while (chassis_next_fast_can_send_ms <= now_ms);
+  }
+
+  if (now_ms >= chassis_next_state_can_send_ms) {
+    CANCommSend(chassis_can_state_comm, (void *)&chassis_feed_state_send);
+    do {
+      chassis_next_state_can_send_ms += CHASSIS_CAN_STATE_PERIOD_MS;
+    } while (chassis_next_state_can_send_ms <= now_ms);
+  }
+#endif
 }
 
 /* 功率控制相关变量已移至独立的power_controller模块 */
@@ -269,11 +371,6 @@ static const float POWER_MODE_LIMIT_SCALE = 1.00f;
 static const float POWER_MODE_OVERDRIVE_SCALE = 1.20f;
 static const uint8_t POWER_MODE_OVERDRIVE_MIN_CAP_ENERGY =
     120; // 约 47% 电量阈值，低于阈值时超功率自动回退
-
-// 视觉跟踪友好机动策略（比赛前可一键关闭）
-#define CHASSIS_TRACKING_FRIENDLY_ENABLE 1
-static const float CHASSIS_TRACKING_LINEAR_SCALE = 0.85f;
-static const float CHASSIS_TRACKING_MAX_WZ = 2.5f;
 
 #if POWER_CONTROLLER_ENABLE
 /**
@@ -419,18 +516,59 @@ void ChassisInit() {
 #ifdef CHASSIS_BOARD
   Chassis_IMU_data = INS_Init(); // 底盘IMU初始化
 
-  CANComm_Init_Config_s comm_conf = {
+  CANComm_Init_Config_s fast_comm_conf = {
       .can_config =
           {
               .can_handle = &hcan2,
               .tx_id = 0x311,
               .rx_id = 0x312,
           },
-      .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
-      .send_data_len = sizeof(Chassis_Upload_Data_s),
+      .recv_data_len = sizeof(Chassis_Ctrl_Fast_Pkt_s),
+      .send_data_len = sizeof(Chassis_Feed_Fast_Pkt_s),
       .daemon_count = 30,
   };
-  chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
+  CANComm_Init_Config_s state_comm_conf = {
+      .can_config =
+          {
+              .can_handle = &hcan2,
+              .tx_id = 0x321,
+              .rx_id = 0x322,
+          },
+      .recv_data_len = sizeof(Chassis_Ctrl_State_Pkt_s),
+      .send_data_len = sizeof(Chassis_Feed_State_Pkt_s),
+      .daemon_count = 30,
+  };
+  CANComm_Init_Config_s ui_comm_conf = {
+      .can_config =
+          {
+              .can_handle = &hcan2,
+              .tx_id = 0x331,
+              .rx_id = 0x332,
+          },
+      .recv_data_len = sizeof(Chassis_Ctrl_UI_Pkt_s),
+      .send_data_len = 0U,
+      .daemon_count = 30,
+  };
+  CANComm_Init_Config_s event_comm_conf = {
+      .can_config =
+          {
+              .can_handle = &hcan2,
+              .tx_id = 0x341,
+              .rx_id = 0x342,
+          },
+      .recv_data_len = sizeof(Chassis_Ctrl_Event_Pkt_s),
+      .send_data_len = 0U,
+      .daemon_count = 30,
+  };
+  chassis_can_fast_comm = CANCommInit(&fast_comm_conf);
+  chassis_can_state_comm = CANCommInit(&state_comm_conf);
+  chassis_can_ui_comm = CANCommInit(&ui_comm_conf);
+  chassis_can_event_comm = CANCommInit(&event_comm_conf);
+  {
+    const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+    chassis_next_fast_can_send_ms = now_ms + CHASSIS_CAN_FAST_PHASE_MS;
+    chassis_next_state_can_send_ms = now_ms + CHASSIS_CAN_STATE_PHASE_MS;
+  }
 #endif                                        // CHASSIS_BOARD
 
 #if POWER_CONTROLLER_ENABLE
@@ -458,15 +596,14 @@ void ChassisInit() {
   // 底盘跟随云台PID控制器初始化（统一力控：输出角速度）
   // 注意：输出单位为角速度（rad/s），后续通过力控PID转换为扭矩
   PID_Init_Config_s follow_pid_config = {
-      .kp = 0.115f, // 单位：(rad/s)/度（角度误差→角速度）
+      .kp = 0.125f, // 单位：(rad/s)/度（角度误差→角速度）
       .ki = 0.0f,   // 积分增益（可选开启）
       .kd = 0.0f,   // 微分增益
       // 微分低通滤波时间常数RC（秒）
       // RobotTask周期约2ms(500Hz)，取微分截止频率fc≈20Hz：
       // RC = 1/(2πfc) ≈ 1/(2π·20) ≈ 0.00796s
-      .Derivative_LPF_RC = 0.019f,
       .IntegralLimit = 0.0f, // 积分限幅：1 rad/s
-      .MaxOut = 10.0f,       // 最大输出：5 rad/s（底盘旋转角速度）
+      .MaxOut = 12.0f,       // 最大输出：5 rad/s（底盘旋转角速度）
       .DeadBand = 0.3f,      // 死区：0.25度（静止时更稳定）
       .Improve = PID_Derivative_On_Measurement | PID_DerivativeFilter,
   };
@@ -870,8 +1007,10 @@ void ChassisTask() {
   SubGetMessage(chassis_sub, &chassis_cmd_recv);
 #endif
 #ifdef CHASSIS_BOARD
-  comm_online = CANCommIsOnline(chasiss_can_comm);
-  chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
+  comm_online =
+      (chassis_can_fast_comm != NULL) ? CANCommIsOnline(chassis_can_fast_comm)
+                                      : 0U;
+  UpdateChassisCommandFromCan();
   if (!comm_online) {
     // 双板链路失联：强制零力并清零速度，禁止沿用旧指令
     chassis_cmd_recv.chassis_mode = CHASSIS_ZERO_FORCE;
@@ -880,11 +1019,6 @@ void ChassisTask() {
     chassis_cmd_recv.wz = 0.0f;
     chassis_cmd_recv.offset_angle = 0.0f;
     chassis_cmd_recv.near_center_error = 0.0f;
-    chassis_cmd_recv.vision_is_tracking = 0U;
-    chassis_cmd_recv.image_online = 0U;
-    chassis_cmd_recv.image_target_locked = 0U;
-    chassis_cmd_recv.image_auto_fire_request = 0U;
-    chassis_cmd_recv.image_should_fire = 0U;
     chassis_cmd_recv.ui_friction_on = 0U;
     chassis_cmd_recv.ui_autoaim_enabled = 0U;
   }
@@ -895,12 +1029,6 @@ void ChassisTask() {
   // 需要乘以增益转换为实际速度(m/s)
   chassis_cmd_recv.vx *= chassis_config.rc.max_linear_speed;
   chassis_cmd_recv.vy *= chassis_config.rc.max_linear_speed;
-#if CHASSIS_TRACKING_FRIENDLY_ENABLE
-  if (chassis_cmd_recv.vision_is_tracking) {
-    chassis_cmd_recv.vx *= CHASSIS_TRACKING_LINEAR_SCALE;
-    chassis_cmd_recv.vy *= CHASSIS_TRACKING_LINEAR_SCALE;
-  }
-#endif
   // 注意: wz(角速度)由底盘根据模式自动设定，不需要在这里处理
 
   const uint8_t control_disabled =
@@ -939,16 +1067,8 @@ void ChassisTask() {
         &chassis_follow_pid, chassis_cmd_recv.near_center_error, 0.0f);
     // 对外环输出做轻微低通，降低 offset_angle/误差台阶对 wz 参考的直接冲击
     static float follow_angular_vel_filtered = 0.0f;
-    follow_angular_vel = LowPassFilter_Float(follow_angular_vel, 0.15f,
+    follow_angular_vel = LowPassFilter_Float(follow_angular_vel, 0.85f,
                                              &follow_angular_vel_filtered);
-#if CHASSIS_TRACKING_FRIENDLY_ENABLE
-    if (chassis_cmd_recv.vision_is_tracking) {
-      follow_angular_vel =
-          float_constrain(follow_angular_vel, -CHASSIS_TRACKING_MAX_WZ,
-                          CHASSIS_TRACKING_MAX_WZ);
-    }
-#endif
-
     // wz统一为角速度（rad/s），后续通过chassis_torque_pid转换为扭矩
     chassis_cmd_recv.wz = follow_angular_vel;
     break;
@@ -1149,31 +1269,10 @@ void ChassisTask() {
   // EstimateSpeed();
 
 feedback_only:
-  // 裁判状态回传给云台板：由底盘作为裁判权威源统一发布
-  uint32_t referee_snapshot_ms = (uint32_t)DWT_GetTimeline_ms();
   chassis_feedback_data.referee_online = referee_online;
-  chassis_feedback_data.regular_online = referee_online;
-  chassis_feedback_data.referee_ts_ms = referee_snapshot_ms;
-  chassis_feedback_data.regular_bridge_version = REGULAR_BRIDGE_VERSION;
-  chassis_feedback_data.regular_bridge_capability = 0U;
-  chassis_feedback_data.regular_cmd_valid_mask = 0U;
-  chassis_feedback_data.regular_cmd_seq = 0U;
   if (referee_online && referee_data != NULL) {
-    uint8_t robot_id = referee_data->GameRobotState.robot_id;
-    chassis_feedback_data.robot_id = robot_id;
-    if (robot_id >= 100U) {
-      chassis_feedback_data.enemy_color = COLOR_RED;
-    } else if (robot_id > 0U) {
-      chassis_feedback_data.enemy_color = COLOR_BLUE;
-    } else {
-      chassis_feedback_data.enemy_color = COLOR_NONE;
-    }
-
-    chassis_feedback_data.current_hp = referee_data->GameRobotState.current_HP;
     chassis_feedback_data.chassis_power_limit =
         referee_data->GameRobotState.chassis_power_limit;
-    chassis_feedback_data.buffer_energy =
-        referee_data->PowerHeatData.buffer_energy;
     chassis_feedback_data.barrel_heat =
         referee_data->PowerHeatData.shooter_42mm_barrel_heat;
     chassis_feedback_data.barrel_heat_limit =
@@ -1193,66 +1292,23 @@ feedback_only:
 
     chassis_feedback_data.bullet_speed =
         SelectBulletSpeedByReferee(referee_data->ShootData.bullet_speed);
-
-    ext_map_command_t map_command_tmp;
-    ext_map_robot_data_t map_robot_tmp;
-    ext_map_path_data_t map_path_tmp;
-    ext_map_robot_custom_data_t map_custom_tmp;
-    uint8_t cmd_valid_mask = 0U;
-
-    if (RefereeTryConsumeMapCommand(&map_command_tmp)) {
-      regular_map_command_cache = map_command_tmp;
-      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0303;
-    }
-    if (RefereeTryConsumeMapRobotData(&map_robot_tmp)) {
-      regular_map_robot_cache = map_robot_tmp;
-      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0305;
-    }
-    if (RefereeTryConsumeMapPathData(&map_path_tmp)) {
-      regular_map_path_cache = map_path_tmp;
-      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0307;
-    }
-    if (RefereeTryConsumeMapRobotCustomData(&map_custom_tmp)) {
-      regular_map_custom_cache = map_custom_tmp;
-      cmd_valid_mask |= REGULAR_BRIDGE_VALID_0308;
-    }
-    if (cmd_valid_mask != 0U) {
-      regular_bridge_seq++;
-    }
   } else {
-    chassis_feedback_data.enemy_color = COLOR_NONE;
-    chassis_feedback_data.robot_id = 0U;
-    chassis_feedback_data.current_hp = 0;
     chassis_feedback_data.chassis_power_limit = 0U;
-    chassis_feedback_data.buffer_energy = 0;
     chassis_feedback_data.barrel_heat = 0U;
     chassis_feedback_data.barrel_heat_limit = 0U;
     chassis_feedback_data.barrel_cooling_value = 0U;
     chassis_feedback_data.rest_heat = 0;
     chassis_feedback_data.bullet_speed_limit = 0.0f;
     chassis_feedback_data.bullet_speed = SMALL_AMU_15;
-    regular_bridge_seq = 0U;
-    chassis_feedback_data.regular_cmd_seq = 0U;
-    chassis_feedback_data.regular_cmd_valid_mask = 0U;
-
-    memset(&regular_map_command_cache, 0, sizeof(regular_map_command_cache));
-    memset(&regular_map_robot_cache, 0, sizeof(regular_map_robot_cache));
-    memset(&regular_map_path_cache, 0, sizeof(regular_map_path_cache));
-    memset(&regular_map_custom_cache, 0, sizeof(regular_map_custom_cache));
   }
 
   SyncGeneratedUIState(comm_online, cap_online, ui_cap_energy);
 
   uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
   if ((now_ms - chassis_last_telemetry_ms) >= CHASSIS_TELEMETRY_PERIOD_MS) {
-    LOGINFO("[chassis-link] referee=%u comm=%u power_mode=%d track=%u "
-            "img_on=%u img_lock=%u fire_req=%u fire=%u heat=%u hp=%u",
+    LOGINFO("[chassis-link] referee=%u comm=%u power_mode=%d heat=%u",
             referee_online, comm_online, chassis_cmd_recv.chassis_speed_buff,
-            chassis_cmd_recv.vision_is_tracking, chassis_cmd_recv.image_online,
-            chassis_cmd_recv.image_target_locked,
-            chassis_cmd_recv.image_auto_fire_request,
-            chassis_cmd_recv.image_should_fire, chassis_feedback_data.rest_heat,
-            chassis_feedback_data.current_hp);
+            chassis_feedback_data.rest_heat);
     chassis_last_telemetry_ms = now_ms;
   }
 
@@ -1261,6 +1317,6 @@ feedback_only:
   PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
 #endif
 #ifdef CHASSIS_BOARD
-  CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
+  SendChassisFeedbackCanIfDue();
 #endif // CHASSIS_BOARD
 }

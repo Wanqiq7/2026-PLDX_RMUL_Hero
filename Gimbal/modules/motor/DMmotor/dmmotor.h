@@ -18,6 +18,10 @@
 #define DM_T_MAX 18.0f
 #define DM_KP_MAX 500.0f
 #define DM_KD_MAX 5.0f
+#define DM_FB_STATE_DISABLED 0x0u
+#define DM_FB_STATE_ENABLED 0x1u
+#define DM_FB_STATE_COMMUNICATION_LOST 0xDu
+#define DM_ENABLE_RETRY_INTERVAL_MS 20U
 
 typedef enum {
   DM_MODE_MIT = 1,
@@ -98,6 +102,7 @@ typedef struct {
   DaemonInstance *motor_daemon;
   uint32_t command_tx_id;
   uint32_t lost_count;
+  uint32_t last_enable_cmd_ms;
 } DMMotorInstance;
 
 typedef enum {

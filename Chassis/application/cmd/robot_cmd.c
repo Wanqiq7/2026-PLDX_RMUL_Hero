@@ -146,18 +146,9 @@ void RobotCMDInit() {
   gimbal_cmd_send.pitch = 0;
   // 默认功率档：额定档（100%）
   chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
-  chassis_cmd_send.vision_is_tracking = 0;
-  chassis_cmd_send.image_online = 0;
-  chassis_cmd_send.image_target_locked = 0;
-  chassis_cmd_send.image_auto_fire_request = 0;
-  chassis_cmd_send.image_should_fire = 0;
-  chassis_cmd_send.image_cmd_seq = 0;
-  chassis_cmd_send.image_ts_ms = 0;
   chassis_cmd_send.ui_friction_on = 0;
   chassis_cmd_send.ui_autoaim_enabled = 0;
   chassis_fetch_data.referee_online = 0;
-  chassis_fetch_data.current_hp = 0;
-  chassis_fetch_data.buffer_energy = 0;
 
   robot_state =
       ROBOT_READY; // 启动时机器人进入工作模式,后续加入所有应用初始化完成之后再进入

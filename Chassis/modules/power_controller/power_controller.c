@@ -12,9 +12,9 @@
 
 /* ======================== 内部变量 ======================== */
 
-// 功率限制查表（参考港科大实现，RM2024规则）
+// 功率限制查表（离线兜底值按 RM2026 当前赛规维护）
 static const uint8_t HeroChassisPowerLimit[MAX_ROBOT_LEVEL] = {
-    95U, 60U, 65U, 70U, 75U, 80U, 85U, 90U, 100U, 120U};
+    100U, 100U, 100U, 100U, 100U, 100U, 100U, 100U, 100U, 100U};
 static const uint8_t InfantryChassisPowerLimit[MAX_ROBOT_LEVEL] = {
     45U, 50U, 55U, 60U, 65U, 70U, 75U, 80U, 90U, 100U};
 static const uint8_t SentryChassisPowerLimit = 100U;

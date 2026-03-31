@@ -22,6 +22,7 @@ osThreadId insTaskHandle;
 osThreadId robotTaskHandle;
 osThreadId motorTaskHandle;
 osThreadId daemonTaskHandle;
+osThreadId refereeTaskHandle;
 osThreadId uiTaskHandle;
 osThreadId sysidTaskHandle;
 
@@ -29,6 +30,7 @@ osThreadId sysidTaskHandle;
 void StartINSTASK(void const *argument);
 void StartMOTORTASK(void const *argument);
 void StartDAEMONTASK(void const *argument);
+void StartREFEREETASK(void const *argument);
 void StartROBOTTASK(void const *argument);
 void StartUITASK(void const *argument);
 void StartSYSIDTASK(void const *argument);
@@ -50,6 +52,10 @@ void OSTaskInit() {
 
   osThreadDef(daemontask, StartDAEMONTASK, osPriorityNormal, 0, 128);
   daemonTaskHandle = osThreadCreate(osThread(daemontask), NULL);
+
+  // 裁判串口解析与 UI 绘制解耦，避免 UI 更新阻塞裁判数据接收。
+  osThreadDef(refereetask, StartREFEREETASK, osPriorityAboveNormal, 0, 256);
+  refereeTaskHandle = osThreadCreate(osThread(refereetask), NULL);
 
   osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 2048);
   robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
@@ -110,6 +116,21 @@ __attribute__((noreturn)) void StartDAEMONTASK(void const *argument) {
     if (daemon_dt > 10)
       LOGERROR("[freeRTOS] Daemon Task is being DELAY! dt = [%f]", &daemon_dt);
     osDelay(10);
+  }
+}
+
+__attribute__((noreturn)) void StartREFEREETASK(void const *argument) {
+  static float referee_dt;
+  static float referee_start;
+  LOGINFO("[freeRTOS] Referee RX Task Start");
+  for (;;) {
+    referee_start = DWT_GetTimeline_ms();
+    RefereeBackgroundTask();
+    referee_dt = DWT_GetTimeline_ms() - referee_start;
+    if (referee_dt > 1)
+      LOGERROR("[freeRTOS] REFEREE RX Task is being DELAY! dt = [%f]",
+               &referee_dt);
+    osDelay(1); // 1kHz: 独立推进裁判解析，降低 UI 任务耦合
   }
 }
 

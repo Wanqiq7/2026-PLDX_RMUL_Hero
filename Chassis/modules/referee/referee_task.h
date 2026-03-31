@@ -34,6 +34,13 @@ referee_info_t *UITaskInit(UART_HandleTypeDef *referee_usart_handle,
                            Referee_UI_Generated_State_t *ui_data);
 
 /**
+ * @brief 裁判系统后台解析任务
+ *
+ * @note 仅负责推进 RefereeProcess()，避免 UI 更新阻塞裁判数据接收。
+ */
+void RefereeBackgroundTask(void);
+
+/**
  * @brief 在 referee task 之前调用，添加在 freertos.c 中
  *
  */

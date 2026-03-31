@@ -37,6 +37,14 @@ referee_info_t *UITaskInit(UART_HandleTypeDef *referee_usart_handle,
   return referee_recv_info;
 }
 
+void RefereeBackgroundTask(void) {
+  if (referee_recv_info == NULL || !referee_recv_info->init_flag) {
+    return;
+  }
+
+  RefereeProcess();
+}
+
 void MyUIInit(void) {
   if (referee_recv_info == NULL || interactive_data == NULL ||
       !referee_recv_info->init_flag) {
@@ -59,8 +67,6 @@ void UITask(void) {
       !referee_recv_info->init_flag) {
     return;
   }
-
-  RefereeProcess();
 
   if (interactive_data->refresh_request_seq != last_ui_refresh_request_seq) {
     last_ui_refresh_request_seq = interactive_data->refresh_request_seq;

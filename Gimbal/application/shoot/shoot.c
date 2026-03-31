@@ -27,9 +27,9 @@ static float shoot_time = 0.0f, shoot_speed = 0.0f;
 static float loader_target_speed = 0.0f;
 
 // 12m/s 固定弹速对应的三摩擦轮目标转速，保留为 volatile 便于 Ozone 在线调参
-volatile float friction_bottom_target_speed_12mps = 58000.0f;
-volatile float friction_top_left_target_speed_12mps = 58000.0f;
-volatile float friction_top_right_target_speed_12mps = 58000.0f;
+volatile float friction_bottom_target_speed_12mps = 24595.0f;
+volatile float friction_top_left_target_speed_12mps = 25325.0f;
+volatile float friction_top_right_target_speed_12mps = 25325.0f;
 
 // 拨盘反转控制（用于卡弹恢复）：反转固定角度（按“一发弹丸角度”计算）
 // 说明：这里不做卡弹检测，仅提供LOAD_REVERSE动作；检测逻辑由上层决定何时进入该模式
@@ -56,11 +56,11 @@ typedef enum {
 
 #define M3508_CURRENT_RAW_PER_AMP 819.2f
 #define LOADER_JAM_CURRENT_THRESHOLD_RAW                                       \
-  ((int16_t)(16.0f * M3508_CURRENT_RAW_PER_AMP))
+  ((int16_t)(18.25f * M3508_CURRENT_RAW_PER_AMP))
 #define LOADER_JAM_SPEED_THRESHOLD_DPS 180.0f
-#define LOADER_JAM_CONFIRM_TIME_MS 500.0f
-#define LOADER_JAM_PROCESS_TIME_MS 800.0f
-#define LOADER_JAM_RECOVERY_OUTPUT_ANGLE_DEG 15.0f
+#define LOADER_JAM_CONFIRM_TIME_MS 325.0f
+#define LOADER_JAM_PROCESS_TIME_MS 850.0f
+#define LOADER_JAM_RECOVERY_OUTPUT_ANGLE_DEG 20.0f
 #define LOADER_JAM_RECOVERY_DELTA_ANGLE                                        \
   (LOADER_JAM_RECOVERY_OUTPUT_ANGLE_DEG * REDUCTION_RATIO_LOADER)
 #define LOADER_JAM_TARGET_TOLERANCE_ANGLE 120.0f

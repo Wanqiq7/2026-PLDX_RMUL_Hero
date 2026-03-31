@@ -42,7 +42,7 @@
 #define switch_is_up(s) (s == RC_SW_UP)
 
 /* ----------------------- PC Key Definition-------------------------------- */
-// 对应 DT7/DR16 手册中的 16bit 键盘位定义
+// 工程内部统一使用的 16bit 键盘位定义
 // bit0~bit15 依次为: W S A D Q E Shift Ctrl R F G Z X C V B
 #define Key_W 0
 #define Key_S 1

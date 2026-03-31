@@ -105,6 +105,11 @@ volatile float gimbal_pitch_mit_kd = 1.48f;
 volatile float gimbal_pitch_mit_v_des = 0.0f;
 /* MIT 期望力矩 τ_des（单位与达妙协议一致），默认置 0；可在 Ozone 实时修改 */
 volatile float gimbal_pitch_mit_torque_des = 0.0f;
+/* 视觉接管专用 MIT 参数，默认与手动模式一致，后续可独立联调 */
+volatile float gimbal_pitch_vision_mit_kp = 21.75f;
+volatile float gimbal_pitch_vision_mit_kd = 2.15f;
+volatile float gimbal_pitch_vision_mit_v_des = 0.0f;
+volatile float gimbal_pitch_vision_mit_torque_des = 0.0f;
 
 static Publisher_t *gimbal_pub;
 static Subscriber_t *gimbal_sub;
@@ -297,6 +302,12 @@ void GimbalTask() {
   // 视觉Pitch接管：使用vision层计算好的限速目标
   if (vision_pitch_takeover) {
     pitch_ref_rad = gimbal_cmd_recv.vision_pitch_ref;
+    mit_kp = float_constrain(gimbal_pitch_vision_mit_kp, 0.0f, DM_KP_MAX);
+    mit_kd = float_constrain(gimbal_pitch_vision_mit_kd, 0.0f, DM_KD_MAX);
+    mit_v_des =
+        float_constrain(gimbal_pitch_vision_mit_v_des, DM_V_MIN, DM_V_MAX);
+    mit_torque = float_constrain(gimbal_pitch_vision_mit_torque_des, DM_T_MIN,
+                                 DM_T_MAX);
   }
 
   switch (gimbal_cmd_recv.gimbal_mode) {

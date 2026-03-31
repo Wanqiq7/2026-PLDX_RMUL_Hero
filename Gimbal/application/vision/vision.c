@@ -19,18 +19,22 @@
 
 /* ==================== 常量定义 ==================== */
 static volatile VisionCtrlParams_s vision_params = {
-    .yaw_pos_kp = 10.5f, // 默认保守值，需实物调参
-    .yaw_pos_ki = 0.0f,
+    .yaw_pos_kp = 6.75f, // 默认保守值，需实物调参
+    .yaw_pos_ki = 1.95f,
     .yaw_rate_kp = 20000.0f,
     .yaw_rate_ki = 2000.0f,
     .yaw_rate_max = 6.0f,
     .yaw_current_max = 16384.0f,
+    .pitch_pos_kp = 85.0f,        // Pitch位置误差转角速度的比例系数
     .pitch_rate_max = 4.0f,
-    .pitch_max_angle = 38.0f,  // Pitch轴最大角度限位 [deg]
-    .pitch_min_angle = -18.5f, // Pitch轴最小角度限位 [deg]
+    .pitch_err_deadband_deg = 0.0f, // Pitch小误差死区，抑制视觉抖动
+    .pitch_target_lpf_k = 0.60f,     // 0表示关闭低通，(0,1] 越大越跟手
+    .pitch_max_angle = 42.5f,  // Pitch轴最大角度限位 [deg]
+    .pitch_min_angle = -20.5f, // Pitch轴最小角度限位 [deg]
     // 前馈参数（默认关闭，需实物调参后启用）
-    .yaw_vel_ff = 0.0f,   // Yaw速度前馈系数
-    .pitch_vel_ff = 0.0f, // Pitch速度前馈系数
+    .yaw_vel_ff = 0.0f,         // Yaw速度前馈系数
+    .pitch_vel_ff = 0.0f,       // Pitch速度前馈系数
+    .pitch_vel_ff_max = 1.5f,   // Pitch速度前馈项限幅 [rad/s]
 };
 
 /* ==================== 私有变量 ==================== */

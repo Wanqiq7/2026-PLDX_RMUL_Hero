@@ -82,6 +82,29 @@ static uint16_t EncodeKeyMask(const Key_t *key_state)
 }
 
 /**
+ * @brief 将 RC 官方键位顺序重映射到工程内部 Key_t 顺序
+ *
+ * 官方顺序: W S A D Shift Ctrl Q E R F G Z X C V B
+ * 工程顺序: W S A D Q E Shift Ctrl R F G Z X C V B
+ *
+ * @param raw_mask RC 原始键盘掩码
+ * @return uint16_t 工程内部键盘位图
+ */
+static uint16_t RemoteControlRemapKeyboardMask(uint16_t raw_mask)
+{
+    uint16_t internal_mask = 0u;
+
+    internal_mask |= raw_mask & 0x000Fu;
+    internal_mask |= ((raw_mask >> 6) & 0x1u) << Key_Q;
+    internal_mask |= ((raw_mask >> 7) & 0x1u) << Key_E;
+    internal_mask |= ((raw_mask >> 4) & 0x1u) << Key_Shift;
+    internal_mask |= ((raw_mask >> 5) & 0x1u) << Key_Ctrl;
+    internal_mask |= raw_mask & 0xFF00u;
+
+    return internal_mask;
+}
+
+/**
  * @brief 矫正遥控器摇杆的值,超过660或者小于-660的值都认为是无效值,置0
  *
  */
@@ -117,8 +140,9 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
     rc_ctrl[TEMP].mouse.press_l = sbus_buf[12];                 //!< Mouse Left Is Press ?
     rc_ctrl[TEMP].mouse.press_r = sbus_buf[13];                 //!< Mouse Right Is Press ?
 
-    // 键盘位图按手册定义: bit0~15 = W,S,A,D,Q,E,Shift,Ctrl,R,F,G,Z,X,C,V,B
-    uint16_t key_now = (uint16_t)(sbus_buf[14] | (sbus_buf[15] << 8));
+    // RC 原始键盘位图遵循官方顺序: W,S,A,D,Shift,Ctrl,Q,E,R,F,G,Z,X,C,V,B
+    uint16_t key_now =
+        RemoteControlRemapKeyboardMask((uint16_t)(sbus_buf[14] | (sbus_buf[15] << 8)));
     uint16_t key_last = EncodeKeyMask(&rc_ctrl[LAST].key[KEY_PRESS]);
     uint16_t key_last_with_ctrl =
         EncodeKeyMask(&rc_ctrl[LAST].key[KEY_PRESS_WITH_CTRL]);
@@ -159,6 +183,7 @@ static void sbus_to_rc(const uint8_t *sbus_buf)
             rc_ctrl[TEMP].key_count[KEY_PRESS_WITH_SHIFT][i]++;
     }
     memcpy(&rc_ctrl[LAST], &rc_ctrl[TEMP], sizeof(RC_ctrl_t)); // 保存上一次的数据,用于按键持续按下和切换的判断
+
 }
 
 /**

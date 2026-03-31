@@ -20,13 +20,17 @@ typedef struct {
   float yaw_rate_ki;     // [raw per rad/s*s] 速度环积分增益
   float yaw_rate_max;    // [rad/s] 角速度参考限幅
   float yaw_current_max; // [raw] 电流指令限幅
-  // Pitch参考生成参数
-  float pitch_rate_max;  // [rad/s] Pitch目标变化率限幅
-  float pitch_max_angle; // [deg] Pitch轴最大角度限位
-  float pitch_min_angle; // [deg] Pitch轴最小角度限位
+  // Pitch参考生成参数（视觉接管专用）
+  float pitch_pos_kp;          // [rad/s per rad] Pitch位置误差比例系数
+  float pitch_rate_max;        // [rad/s] Pitch参考角速度限幅
+  float pitch_err_deadband_deg; // [deg] Pitch误差死区
+  float pitch_target_lpf_k;    // [1] 0表示关闭低通，(0,1] 越大越跟手
+  float pitch_max_angle;       // [deg] Pitch轴最大角度限位
+  float pitch_min_angle;       // [deg] Pitch轴最小角度限位
   // 前馈参数
-  float yaw_vel_ff;   // [1] Yaw速度前馈系数，作用于位置环输出
-  float pitch_vel_ff; // [1] Pitch速度前馈系数，作用于限速器
+  float yaw_vel_ff;       // [1] Yaw速度前馈系数，作用于位置环输出
+  float pitch_vel_ff;     // [1] Pitch速度前馈系数，作用于角速度参考
+  float pitch_vel_ff_max; // [rad/s] Pitch速度前馈项限幅
 } VisionCtrlParams_s;
 
 /* ==================== 控制器状态 ==================== */
@@ -38,7 +42,8 @@ typedef struct {
 
 typedef struct {
   uint8_t inited;
-  float ref_rad; // 当前参考值
+  float ref_rad;             // 当前参考值
+  float target_rad_filtered; // 低通后的目标值
 } VisionPitchRefGen_s;
 
 typedef struct {

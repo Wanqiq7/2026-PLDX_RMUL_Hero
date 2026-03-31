@@ -226,7 +226,7 @@ void VisionSendIMUPacket(const float q[4], float yaw, float yaw_vel,
     (void)CANTransmit(vision_can_ins, 0.0f);
 
     // 弹速/模式帧降频发送
-    int16_t bullet_speed_raw = (int16_t)(15.6f);
+    int16_t bullet_speed_raw = (int16_t)(vision_bullet_speed_cached);
     uint8_t need_send_bullet = 0;
     if ((vision_can_bullet_div++ % VISION_CAN_BULLET_FRAME_DIV) == 0) {
       need_send_bullet = 1;

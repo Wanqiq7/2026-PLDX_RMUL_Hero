@@ -46,9 +46,9 @@
 #define YAW_CHASSIS_ALIGN_ECD                                                  \
   5695
 #define PITCH_MAX_ANGLE                                                        \
-  39.5f
+  42.5f
 #define PITCH_MIN_ANGLE                                                        \
-  -10.5f
+  -19.5f
 
 
 #define PITCH_GRAVITY_K 0.0f
@@ -64,7 +64,7 @@
                            // 减速比 = 60×51 = 3060°
 #define NUM_PER_CIRCLE 6
 
-#define HEAT_PER_SHOT_D 1.0f
+#define HEAT_PER_SHOT_D 100.0f
 #define FEEDFORWARD_T_TARGET_S 1.0f
 #define SHOOT_RATE_MIN 0.5f
 #define SHOOT_RATE_MAX 3.0f
@@ -217,14 +217,6 @@ typedef struct {
       near_center_error;
   chassis_mode_e chassis_mode;
   int chassis_speed_buff;
-  uint8_t
-      vision_is_tracking;
-  uint8_t image_online;
-  uint8_t image_target_locked;
-  uint8_t image_auto_fire_request;
-  uint8_t image_should_fire;
-  uint16_t image_cmd_seq;          // 图传控制序号
-  uint32_t image_ts_ms;
   uint8_t ui_friction_on;
   uint8_t ui_autoaim_enabled;
   uint8_t ui_fire_allow;
@@ -278,21 +270,6 @@ typedef struct {
  *
  */
 
-// 常规扩展命令桥接契约版本与能力位（Chassis
-
-#define REGULAR_BRIDGE_VERSION 1u
-#define REGULAR_BRIDGE_CAP_0303 (1u << 0)
-#define REGULAR_BRIDGE_CAP_0305 (1u << 1)
-#define REGULAR_BRIDGE_CAP_0307 (1u << 2)
-#define REGULAR_BRIDGE_CAP_0308 (1u << 3)
-#define REGULAR_BRIDGE_CAP_MASK                                                \
-  (REGULAR_BRIDGE_CAP_0303 | REGULAR_BRIDGE_CAP_0305 |                         \
-   REGULAR_BRIDGE_CAP_0307 | REGULAR_BRIDGE_CAP_0308)
-#define REGULAR_BRIDGE_VALID_0303 REGULAR_BRIDGE_CAP_0303
-#define REGULAR_BRIDGE_VALID_0305 REGULAR_BRIDGE_CAP_0305
-#define REGULAR_BRIDGE_VALID_0307 REGULAR_BRIDGE_CAP_0307
-#define REGULAR_BRIDGE_VALID_0308 REGULAR_BRIDGE_CAP_0308
-
 typedef struct {
 #if defined(CHASSIS_BOARD) ||                                                  \
     defined(                                                                   \
@@ -305,29 +282,56 @@ typedef struct {
   // float real_wz;
 
   uint8_t referee_online;      // 裁判系统在线标志(1:在线,0:离线)
-  uint16_t current_hp;
-  uint16_t buffer_energy;      // 裁判系统功率缓冲能量
   uint8_t rest_heat;           // 剩余枪口热量
   Bullet_Speed_e bullet_speed;
-  Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
-
-  uint8_t
-      regular_online;
-  uint8_t robot_id;              // 裁判系统机器人ID
   uint16_t chassis_power_limit;  // 裁判系统底盘功率上限
   uint16_t barrel_heat;          // 当前枪口热量
   uint16_t barrel_heat_limit;    // 枪口热量上限
   uint16_t barrel_cooling_value;
   float bullet_speed_limit; // 弹速上限（当前使用实测弹速近似）
-  uint32_t referee_ts_ms;
-
-  uint8_t regular_bridge_version;    // 桥接协议版本
-  uint8_t regular_bridge_capability;
-  uint8_t regular_cmd_valid_mask;
-  uint8_t
-      regular_cmd_seq;
 
 } Chassis_Upload_Data_s;
+
+#pragma pack(1)
+typedef struct {
+  float vx;
+  float vy;
+  float wz;
+  float offset_angle;
+  float near_center_error;
+  chassis_mode_e chassis_mode;
+} Chassis_Ctrl_Fast_Pkt_s;
+
+typedef struct {
+  int32_t chassis_speed_buff;
+} Chassis_Ctrl_State_Pkt_s;
+
+typedef struct {
+  uint8_t ui_friction_on;
+  uint8_t ui_autoaim_enabled;
+  uint8_t ui_fire_allow;
+  uint8_t ui_stuck_active;
+  uint8_t ui_loader_mode;
+} Chassis_Ctrl_UI_Pkt_s;
+
+typedef struct {
+  uint16_t ui_refresh_request_seq;
+} Chassis_Ctrl_Event_Pkt_s;
+
+typedef struct {
+  uint8_t referee_online;
+  uint8_t rest_heat;
+  uint16_t barrel_heat;
+  uint16_t barrel_heat_limit;
+  uint16_t barrel_cooling_value;
+  float bullet_speed_limit;
+} Chassis_Feed_Fast_Pkt_s;
+
+typedef struct {
+  Bullet_Speed_e bullet_speed;
+  uint16_t chassis_power_limit;
+} Chassis_Feed_State_Pkt_s;
+#pragma pack()
 
 // 双板CAN通信单包最大有效负载为60字节，防止结构体膨胀导致越界
 #if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)

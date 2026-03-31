@@ -17,8 +17,8 @@
 
 /* ======================== 配置宏定义 ======================== */
 // 使能开关
-#define POWER_CONTROLLER_ENABLE 0 // 功率控制总开关（正常比赛模式开启）
-#define RLS_ENABLE 0              // RLS参数辨识使能（调试力控PID时关闭）
+#define POWER_CONTROLLER_ENABLE 1 // 功率控制总开关（正常比赛模式开启）
+#define RLS_ENABLE 1              // RLS参数辨识使能（调试力控PID时关闭）
 
 // RLS保护参数（防止协方差爆炸）
 #define RLS_MIN_TORQUE_SQ 0.08f            // 最小力矩平方和阈值 (Nm²)

@@ -336,7 +336,6 @@ void RefereeProcess(void)
             RefereeResetParser();
             return;
         }
-
         if (referee_rx_parser.polling_status != USART_POLLING_DONE)
             break;
     }

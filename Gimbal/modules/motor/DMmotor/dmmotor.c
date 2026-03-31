@@ -102,6 +102,18 @@ static inline uint32_t DMMotorTargetStdId(const DMMotorInstance *motor) {
   return motor->command_tx_id + (motor->use_pvt_command_frame ? 0x300u : 0u);
 }
 
+static uint8_t DMMotorNeedEnableRetry(const DMMotorInstance *motor) {
+  if (!motor) {
+    return 0U;
+  }
+
+  if (motor->motor_daemon == NULL || !DaemonIsOnline(motor->motor_daemon)) {
+    return 1U;
+  }
+
+  return (motor->measure.motor_state == DM_FB_STATE_DISABLED) ? 1U : 0U;
+}
+
 static void DMMotorSendCommand(DMMotor_Mode_e cmd, DMMotorInstance *motor) {
   if (!motor || !motor->motor_can_instance) {
     return;
@@ -122,6 +134,14 @@ static void DMMotorDecode(CANInstance *motor_can) {
   DM_Motor_Measure_s *measure = &motor->measure;
 
   DaemonReload(motor->motor_daemon);
+
+  measure->motor_id = rxbuff[0] & 0x0f;
+  measure->motor_state = (rxbuff[0] >> 4) & 0x0f;
+  if (measure->motor_state == DM_FB_STATE_ENABLED) {
+    motor->stop_flag = MOTOR_ENALBED;
+  } else if (measure->motor_state == DM_FB_STATE_DISABLED) {
+    motor->stop_flag = MOTOR_STOP;
+  }
 
   measure->last_output_angle_rad = measure->output_angle_rad;
   tmp = (uint16_t)((rxbuff[1] << 8) | rxbuff[2]);
@@ -146,7 +166,9 @@ static void DMMotorLostCallback(void *motor_ptr) {
   uint16_t can_bus = motor->motor_can_instance->can_handle == &hcan1 ? 1 : 2;
   LOGWARNING("[dm_motor] Motor lost, can bus [%d], tx_id [0x%X]", can_bus,
              motor->motor_can_instance->tx_id);
+  motor->measure.motor_state = DM_FB_STATE_COMMUNICATION_LOST;
   motor->stop_flag = MOTOR_STOP;
+  motor->lost_count++;
 }
 
 void DMMotorCaliEncoder(DMMotorInstance *motor) {
@@ -170,6 +192,7 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config) {
 
   motor->mit_limit = DMMotorResolveLimit(&config->mit_config);
   motor->drive_mode = DM_MODE_MIT;
+  motor->measure.motor_state = DM_FB_STATE_DISABLED;
   motor->pvt_config = config->pvt_config;
   if (motor->pvt_config.v_limit_max <= 0.0f ||
       motor->pvt_config.v_limit_max > 100.0f) {
@@ -295,7 +318,17 @@ void DMMotorEnable(DMMotorInstance *motor) {
   if (!motor) {
     return;
   }
-  if (motor->stop_flag == MOTOR_ENALBED) {
+  if (motor->stop_flag == MOTOR_ENALBED &&
+      motor->measure.motor_state == DM_FB_STATE_ENABLED) {
+    return;
+  }
+  if (motor->stop_flag == MOTOR_ENALBED && !DMMotorNeedEnableRetry(motor)) {
+    return;
+  }
+
+  uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+  if (motor->last_enable_cmd_ms != 0U &&
+      (now_ms - motor->last_enable_cmd_ms) < DM_ENABLE_RETRY_INTERVAL_MS) {
     return;
   }
 
@@ -303,6 +336,7 @@ void DMMotorEnable(DMMotorInstance *motor) {
   DWT_Delay(0.01);
   DMMotorSendCommand(DM_CMD_MOTOR_MODE, motor);
   motor->stop_flag = MOTOR_ENALBED;
+  motor->last_enable_cmd_ms = now_ms;
 }
 
 void DMMotorStop(DMMotorInstance *motor) {
@@ -315,6 +349,7 @@ void DMMotorStop(DMMotorInstance *motor) {
 
   DMMotorSendCommand(DM_CMD_RESET_MODE, motor);
   motor->stop_flag = MOTOR_STOP;
+  motor->last_enable_cmd_ms = 0U;
 }
 
 void DMMotorOuterLoop(DMMotorInstance *motor, Closeloop_Type_e type) {
