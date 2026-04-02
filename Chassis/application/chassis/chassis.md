@@ -4,20 +4,35 @@
 @Todo 使用条件编译，选择麦轮(全向轮),舵轮,平衡底盘
 ## 工作流程
 
-首先进行初始化，`ChasissInit()`会被`RobotInit()`调用，进行裁判系统、底盘电机的初始化。如果为双板模式，则还会初始化IMU，并且将消息订阅者和发布者的初始化改为`CANComm`的初始化。
+首先进行初始化，`ChasissInit()`会被`RobotInit()`调用，进行裁判系统、底盘电机、功率控制和力控模块的初始化。如果为双板模式，则还会初始化 IMU，并通过 `modules/can_comm/chassis_can_link` 完成 CANComm 桥接初始化。
 
 操作系统启动后，工作顺序为：
 
-1. 从cmd模块获取数据（如果双板则从CANComm获取）
-2. 判断当前控制数据的模式，如果为停止则停止所有电机
-3. 根据控制数据，计算底盘的旋转速度
-4. 根据控制数据中yaw电机的编码器值`angle_offset`，将控制数据映射到底盘坐标系下
-5. 进行麦克纳姆轮的运动学解算，得到每个电机的设定值
-6. 获取裁判系统的数据，并根据底盘功率限制对输出进行限幅
-7. 由电机的反馈数据和IMU（如果有），计算底盘当前的真实运动速度
-8. 设置底盘反馈数据，包括运动速度和裁判系统数据
-9. 将反馈数据推送到消息中心（如果双板则通过CANComm发送）
+1. 从 cmd 模块获取数据；双板模式下通过 `ChassisCanLinkUpdateCommand()` 读取 CAN 桥接命令。
+2. 判断当前控制模式；若为 `CHASSIS_ZERO_FORCE`，立即停机并重置跟随 PID 与力控模块状态。
+3. 根据控制模式决定 `wz` 目标。
+4. 将控制量根据 `offset_angle` 投影到底盘坐标系下。
+5. 调用 `ChassisForceControlSetCommand()` 和 `ChassisForceControlStep()`，由独立算法模块完成：
+   - 麦轮正运动学
+   - 速度估算
+   - 速度闭环到力/扭矩
+   - 力分配
+   - 力到电流转换与摩擦补偿
+6. 获取裁判系统和超级电容数据，并通过 `power_controller` 对轮端输出做功率限制。
+7. 设置底盘反馈数据，包括热量、功率上限和弹速限制等。
+8. 更新 UI 状态和遥测。
+9. 将反馈数据推送到消息中心；双板模式下通过 `ChassisCanLinkSendFeedbackIfDue()` 分周期发送。
 
+## 当前分层
+
+- `application/chassis/chassis.c`
+  只保留底盘应用编排、模式选择、功率控制调用、UI/反馈收尾。
+- `modules/can_comm/chassis_can_link.c`
+  负责双板 CANComm 命令接收与反馈发包。
+- `modules/algorithm/chassis_force_control.c`
+  负责底盘力控控制核，包括速度估算、力分配、轮端电流计算。
+- `modules/power_controller/*`
+  负责功率限制、RLS 参数辨识和能量环。
 
 ### 后续支持平衡底盘
 
@@ -25,8 +40,8 @@
 
 ## 安全降级约束（双板）
 
-1. 底盘板每周期读取 `CANComm` 控制命令后，必须检查链路在线状态。
-2. 一旦 `CANCommIsOnline()==0`，立即执行“失联即零力”：
+1. 底盘板每周期通过 `ChassisCanLinkUpdateCommand()` 读取控制命令后，必须检查链路在线状态。
+2. 一旦链路离线，立即执行“失联即零力”：
 - `chassis_mode = CHASSIS_ZERO_FORCE`
 - `vx/vy/wz` 清零
 - 禁止沿用上一帧有效控制指令

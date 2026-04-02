@@ -1,9 +1,11 @@
 #include "chassis.h"
+#include "chassis_can_link.h"
 #include "VOFA.h"
 #include "arm_math_compat.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
 #include "bsp_usart.h"
+#include "chassis_force_control.h"
 #include "controller.h"
 #include "dji_motor.h"
 #include "general_def.h"
@@ -113,12 +115,7 @@ static const Chassis_Runtime_Config_t chassis_config = {
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体
  */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
-#include "can_comm.h"
 #include "ins_task.h"
-static CANCommInstance *chassis_can_fast_comm;
-static CANCommInstance *chassis_can_state_comm;
-static CANCommInstance *chassis_can_ui_comm;
-static CANCommInstance *chassis_can_event_comm;
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
 #ifdef ONE_BOARD
@@ -127,18 +124,6 @@ static Subscriber_t *chassis_sub;                    // 用于订阅底盘的控
 #endif                                               // !ONE_BOARD
 static Chassis_Ctrl_Cmd_s chassis_cmd_recv;          // 底盘接收到的控制命令
 static Chassis_Upload_Data_s chassis_feedback_data;  // 底盘回传的反馈数据
-static Chassis_Ctrl_Fast_Pkt_s chassis_ctrl_fast_recv;
-static Chassis_Ctrl_State_Pkt_s chassis_ctrl_state_recv;
-static Chassis_Ctrl_UI_Pkt_s chassis_ctrl_ui_recv;
-static Chassis_Ctrl_Event_Pkt_s chassis_ctrl_event_recv;
-static Chassis_Feed_Fast_Pkt_s chassis_feed_fast_send;
-static Chassis_Feed_State_Pkt_s chassis_feed_state_send;
-static uint32_t chassis_next_fast_can_send_ms = 0U;
-static uint32_t chassis_next_state_can_send_ms = 0U;
-static const uint32_t CHASSIS_CAN_FAST_PERIOD_MS = 10U;  // 100Hz
-static const uint32_t CHASSIS_CAN_STATE_PERIOD_MS = 50U; // 20Hz
-static const uint32_t CHASSIS_CAN_FAST_PHASE_MS = 5U;
-static const uint32_t CHASSIS_CAN_STATE_PHASE_MS = 8U;
 
 static referee_info_t *referee_data; // 用于获取裁判系统的数据
 static Referee_UI_Generated_State_t
@@ -226,137 +211,7 @@ static void SyncGeneratedUIState(uint8_t comm_online, uint8_t cap_online,
   }
 }
 
-static void UpdateChassisCommandFromCan(void) {
-#ifdef CHASSIS_BOARD
-  if (chassis_can_fast_comm != NULL && CANCommIsOnline(chassis_can_fast_comm)) {
-    memcpy(&chassis_ctrl_fast_recv, CANCommGet(chassis_can_fast_comm),
-           sizeof(chassis_ctrl_fast_recv));
-    chassis_cmd_recv.vx = chassis_ctrl_fast_recv.vx;
-    chassis_cmd_recv.vy = chassis_ctrl_fast_recv.vy;
-    chassis_cmd_recv.wz = chassis_ctrl_fast_recv.wz;
-    chassis_cmd_recv.offset_angle = chassis_ctrl_fast_recv.offset_angle;
-    chassis_cmd_recv.near_center_error = chassis_ctrl_fast_recv.near_center_error;
-    chassis_cmd_recv.chassis_mode = chassis_ctrl_fast_recv.chassis_mode;
-  } else {
-    memset(&chassis_cmd_recv, 0, sizeof(chassis_cmd_recv));
-    return;
-  }
-
-  if (chassis_can_state_comm != NULL &&
-      CANCommIsOnline(chassis_can_state_comm)) {
-    memcpy(&chassis_ctrl_state_recv, CANCommGet(chassis_can_state_comm),
-           sizeof(chassis_ctrl_state_recv));
-    chassis_cmd_recv.chassis_speed_buff =
-        chassis_ctrl_state_recv.chassis_speed_buff;
-  } else {
-    chassis_cmd_recv.chassis_speed_buff = 100;
-  }
-
-  if (chassis_can_ui_comm != NULL && CANCommIsOnline(chassis_can_ui_comm)) {
-    memcpy(&chassis_ctrl_ui_recv, CANCommGet(chassis_can_ui_comm),
-           sizeof(chassis_ctrl_ui_recv));
-    chassis_cmd_recv.ui_friction_on = chassis_ctrl_ui_recv.ui_friction_on;
-    chassis_cmd_recv.ui_autoaim_enabled =
-        chassis_ctrl_ui_recv.ui_autoaim_enabled;
-    chassis_cmd_recv.ui_fire_allow = chassis_ctrl_ui_recv.ui_fire_allow;
-    chassis_cmd_recv.ui_stuck_active = chassis_ctrl_ui_recv.ui_stuck_active;
-    chassis_cmd_recv.ui_loader_mode = chassis_ctrl_ui_recv.ui_loader_mode;
-  } else {
-    chassis_cmd_recv.ui_friction_on = 0U;
-    chassis_cmd_recv.ui_autoaim_enabled = 0U;
-    chassis_cmd_recv.ui_fire_allow = 0U;
-    chassis_cmd_recv.ui_stuck_active = 0U;
-    chassis_cmd_recv.ui_loader_mode = (uint8_t)LOAD_STOP;
-  }
-
-  if (chassis_can_event_comm != NULL) {
-    memcpy(&chassis_ctrl_event_recv, CANCommGet(chassis_can_event_comm),
-           sizeof(chassis_ctrl_event_recv));
-    chassis_cmd_recv.ui_refresh_request_seq =
-        chassis_ctrl_event_recv.ui_refresh_request_seq;
-  }
-#endif
-}
-
-static void BuildChassisFeedbackCanPackets(void) {
-  chassis_feed_fast_send.referee_online = chassis_feedback_data.referee_online;
-  chassis_feed_fast_send.rest_heat = chassis_feedback_data.rest_heat;
-  chassis_feed_fast_send.barrel_heat = chassis_feedback_data.barrel_heat;
-  chassis_feed_fast_send.barrel_heat_limit =
-      chassis_feedback_data.barrel_heat_limit;
-  chassis_feed_fast_send.barrel_cooling_value =
-      chassis_feedback_data.barrel_cooling_value;
-  chassis_feed_fast_send.bullet_speed_limit =
-      chassis_feedback_data.bullet_speed_limit;
-
-  chassis_feed_state_send.bullet_speed = chassis_feedback_data.bullet_speed;
-  chassis_feed_state_send.chassis_power_limit =
-      chassis_feedback_data.chassis_power_limit;
-}
-
-static void SendChassisFeedbackCanIfDue(void) {
-#ifdef CHASSIS_BOARD
-  const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
-
-  if (chassis_can_fast_comm == NULL || chassis_can_state_comm == NULL) {
-    return;
-  }
-
-  BuildChassisFeedbackCanPackets();
-
-  if (now_ms >= chassis_next_fast_can_send_ms) {
-    CANCommSend(chassis_can_fast_comm, (void *)&chassis_feed_fast_send);
-    do {
-      chassis_next_fast_can_send_ms += CHASSIS_CAN_FAST_PERIOD_MS;
-    } while (chassis_next_fast_can_send_ms <= now_ms);
-  }
-
-  if (now_ms >= chassis_next_state_can_send_ms) {
-    CANCommSend(chassis_can_state_comm, (void *)&chassis_feed_state_send);
-    do {
-      chassis_next_state_can_send_ms += CHASSIS_CAN_STATE_PERIOD_MS;
-    } while (chassis_next_state_can_send_ms <= now_ms);
-  }
-#endif
-}
-
 /* 功率控制相关变量已移至独立的power_controller模块 */
-
-/* ----------------力控策略相关变量---------------- */
-// 力控LQR控制器（替换PID实现更优控制）
-// 力控PID控制器（速度→力/扭矩）
-static PIDInstance chassis_force_x_pid; // X方向速度PID（输出：力 N）
-static PIDInstance chassis_force_y_pid; // Y方向速度PID（输出：力 N）
-static PIDInstance chassis_torque_pid;  // 旋转速度PID（输出：扭矩 N·m）
-
-// 速度估算相关变量
-static float chassis_estimated_vx = 0.0f; // 底盘估算速度X (m/s)
-static float chassis_estimated_vy = 0.0f; // 底盘估算速度Y (m/s)
-static float chassis_estimated_wz = 0.0f; // 底盘估算角速度 (rad/s)
-
-// 力控中间变量
-static float force_x = 0.0f;   // X方向控制力 (N)
-static float force_y = 0.0f;   // Y方向控制力 (N)
-static float torque_z = 0.0f;  // Z轴控制扭矩 (N·m)
-static float wheel_force[4];   // 各轮分配的力 (N)
-static float wheel_current[4]; // 各轮电流指令 (A)
-
-/* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
-static float chassis_vx, chassis_vy; // 将云台系的速度投影到底盘坐标系
-
-// 力控 + 速度内环：麦轮正运动学解算的目标轮速（rad/s）
-static float target_wheel_omega[4]; // 各轮目标角速度，用于速度内环反馈
-
-// robowalker 风格轮速补偿参数
-// 使用 volatile + 非 static，确保在 Ozone 中可以直接修改 RAM 中的调参变量
-volatile float wheel_dynamic_resistance_current[4] = {
-    FRICTION_DYNAMIC_CURRENT,
-    FRICTION_DYNAMIC_CURRENT,
-    FRICTION_DYNAMIC_CURRENT,
-    FRICTION_DYNAMIC_CURRENT,
-};
-volatile float wheel_resistance_omega_threshold = 20.0f;
-volatile float wheel_speed_feedback_gain = 0.005f;
 
 // 键鼠功率档位参数（对应 cmd 层 C 键循环：100% -> 80% -> 120%）
 static const int POWER_MODE_ECO_PERCENT = 80;
@@ -515,60 +370,7 @@ void ChassisInit() {
   // 发布订阅初始化,如果为双板,则需要can comm来传递消息
 #ifdef CHASSIS_BOARD
   Chassis_IMU_data = INS_Init(); // 底盘IMU初始化
-
-  CANComm_Init_Config_s fast_comm_conf = {
-      .can_config =
-          {
-              .can_handle = &hcan2,
-              .tx_id = 0x311,
-              .rx_id = 0x312,
-          },
-      .recv_data_len = sizeof(Chassis_Ctrl_Fast_Pkt_s),
-      .send_data_len = sizeof(Chassis_Feed_Fast_Pkt_s),
-      .daemon_count = 30,
-  };
-  CANComm_Init_Config_s state_comm_conf = {
-      .can_config =
-          {
-              .can_handle = &hcan2,
-              .tx_id = 0x321,
-              .rx_id = 0x322,
-          },
-      .recv_data_len = sizeof(Chassis_Ctrl_State_Pkt_s),
-      .send_data_len = sizeof(Chassis_Feed_State_Pkt_s),
-      .daemon_count = 30,
-  };
-  CANComm_Init_Config_s ui_comm_conf = {
-      .can_config =
-          {
-              .can_handle = &hcan2,
-              .tx_id = 0x331,
-              .rx_id = 0x332,
-          },
-      .recv_data_len = sizeof(Chassis_Ctrl_UI_Pkt_s),
-      .send_data_len = 0U,
-      .daemon_count = 30,
-  };
-  CANComm_Init_Config_s event_comm_conf = {
-      .can_config =
-          {
-              .can_handle = &hcan2,
-              .tx_id = 0x341,
-              .rx_id = 0x342,
-          },
-      .recv_data_len = sizeof(Chassis_Ctrl_Event_Pkt_s),
-      .send_data_len = 0U,
-      .daemon_count = 30,
-  };
-  chassis_can_fast_comm = CANCommInit(&fast_comm_conf);
-  chassis_can_state_comm = CANCommInit(&state_comm_conf);
-  chassis_can_ui_comm = CANCommInit(&ui_comm_conf);
-  chassis_can_event_comm = CANCommInit(&event_comm_conf);
-  {
-    const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
-    chassis_next_fast_can_send_ms = now_ms + CHASSIS_CAN_FAST_PHASE_MS;
-    chassis_next_state_can_send_ms = now_ms + CHASSIS_CAN_STATE_PHASE_MS;
-  }
+  ChassisCanLinkInit(&hcan2, (uint32_t)DWT_GetTimeline_ms());
 #endif                                        // CHASSIS_BOARD
 
 #if POWER_CONTROLLER_ENABLE
@@ -609,8 +411,7 @@ void ChassisInit() {
   };
   PIDInit(&chassis_follow_pid, &follow_pid_config);
 
-  /* ----------------力控策略PID初始化---------------- */
-  // X方向力控PID初始化 (输出单位: N)
+  /* ----------------力控策略模块初始化---------------- */
   PID_Init_Config_s force_x_pid_config = {
       .kp = 525.0f,                // 比例增益 [N/(m/s)]
       .ki = 0.0f,                  // 积分增益 [N/(m·s)]
@@ -621,9 +422,6 @@ void ChassisInit() {
       .DeadBand = 0.03f,           // 死区 [m/s]
       .Improve = PID_Integral_Limit,
   };
-  PIDInit(&chassis_force_x_pid, &force_x_pid_config);
-
-  // Y方向力控PID初始化 (输出单位: N)
   PID_Init_Config_s force_y_pid_config = {
       .kp = 625.0f,
       .ki = 0.0f,
@@ -634,9 +432,6 @@ void ChassisInit() {
       .DeadBand = 0.03f,
       .Improve = PID_Integral_Limit,
   };
-  PIDInit(&chassis_force_y_pid, &force_y_pid_config);
-
-  // 旋转扭矩PID初始化 (输出单位: N·m) - 优化参数减少振荡
   PID_Init_Config_s torque_pid_config = {
       .kp = 80.0f, // 比例增益 [N·m/(rad/s)] - 从2.5降至1.5减少过冲
       .ki = 0.0f,  // 积分增益 [N·m/rad]
@@ -644,327 +439,52 @@ void ChassisInit() {
       .MaxOut = 100.0f,
       .DeadBand = 0.05f, // 死区 [rad/s] - 修复：从0.15增至0.3，减少回位后震荡
   };
-  PIDInit(&chassis_torque_pid, &torque_pid_config);
+  ChassisForceControlConfig_s force_ctrl_config = {
+      .wheel_radius = RADIUS_WHEEL,
+      .reduction_ratio_wheel = REDUCTION_RATIO_WHEEL,
+      .half_wheel_base = HALF_WHEEL_BASE,
+      .half_track_width = HALF_TRACK_WIDTH,
+      .center_gimbal_offset_x = CENTER_GIMBAL_OFFSET_X,
+      .center_gimbal_offset_y = CENTER_GIMBAL_OFFSET_Y,
+      .torque_feedforward_coeff = chassis_config.force.torque_feedforward_coeff,
+      .velocity_lpf_alpha = chassis_config.kinematics.velocity_lpf_alpha,
+      .max_control_force = MAX_CONTROL_FORCE,
+      .max_control_torque = MAX_CONTROL_TORQUE,
+      .max_wheel_current = MAX_WHEEL_CURRENT,
+      .wheel_dynamic_current_default = FRICTION_DYNAMIC_CURRENT,
+      .wheel_resistance_omega_threshold_default = 20.0f,
+      .wheel_speed_feedback_gain_default = 0.005f,
+      .torque_constant = M3508_TORQUE_CONSTANT,
+      .force_x_pid_config = force_x_pid_config,
+      .force_y_pid_config = force_y_pid_config,
+      .torque_pid_config = torque_pid_config,
+  };
+  ChassisForceControlInit(&force_ctrl_config, motor_rf, motor_lf, motor_lb,
+                          motor_rb);
 
   /* ----------------底盘系统辨识初始化---------------- */
   // 初始化底盘轮速系统辨识任务（用于LQR参数标定）
   Chassis_SysIDTaskInit(motor_lf, motor_rf, motor_lb, motor_rb);
 }
 
-// 麦克纳姆轮旋转力臂计算（单位：m）
-// 物理模型：对于45度麦轮，底盘原地旋转时，单个轮子产生的横向和纵向摩擦力相等。
-// 等效力臂应当为：横向力臂与纵向力臂的绝对值之和（即曼哈顿距离 Lx +
-// Ly），而非欧氏距离。 WHEEL_BASE和TRACK_WIDTH在robot_def.h中已经是m，无需转换
-#define LF_CENTER                                                              \
-  (fabsf(HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X) +                          \
-   fabsf(HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y))
-#define RF_CENTER                                                              \
-  (fabsf(HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X) +                          \
-   fabsf(HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y))
-#define LB_CENTER                                                              \
-  (fabsf(HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X) +                          \
-   fabsf(HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y))
-#define RB_CENTER                                                              \
-  (fabsf(HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X) +                          \
-   fabsf(HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y))
-
-/* ==================================================== */
-/* ----------------力控策略核心函数---------------- */
-/* ==================================================== */
-
-/**
- * @brief 麦轮正运动学解算 - 计算各轮目标角速度（用于速度内环反馈）
- * @note  参考robowalker的Kinematics_Inverse_Resolution思想
- *        从底盘速度(vx,vy,wz)解算出各轮的目标角速度
- *
- * 物理坐标系约定：
- *  x轴：底盘正前方 (前进)
- *  y轴：底盘正左方 (平移)
- *  z轴：指向上方，符合右手螺旋定则，逆时针旋转为正 (Wz > 0)
- *
- * 速度分配公式（结合电机转向与麦轮45度辊子特性）：
- *  V_RF = -Vx + Vy + Wz * RF_CENTER
- *  V_LF = -Vx - Vy + Wz * LF_CENTER
- *  V_LB =  Vx - Vy + Wz * LB_CENTER
- *  V_RB =  Vx + Vy + Wz * RB_CENTER
- *
- * 注意：由于本代码中4个电机全部配置为 MOTOR_DIRECTION_REVERSE，
- * 此处分配的符号(+Wz, -Vx)在发送到电机驱动后会被硬件取反，
- * 最终与底盘受力模型完全吻合。
- */
-static void MecanumKinematicsCalculate() {
-  float vx = chassis_vx;
-  float vy = chassis_vy;
-  float wz = chassis_cmd_recv.wz;
-
-  // 计算各轮线速度（m/s）- 必须与力分配公式的符号一致
-  // ⚠️ 数组顺序必须与 motors[] = {RF, LF, LB, RB} 一致（572行）
-  float wheel_linear_vel[4];
-  wheel_linear_vel[0] = (-vx + vy) + wz * RF_CENTER; // 右前 (RF)
-  wheel_linear_vel[1] = (-vx - vy) + wz * LF_CENTER; // 左前 (LF)
-  wheel_linear_vel[2] = (vx - vy) + wz * LB_CENTER;  // 左后 (LB)
-  wheel_linear_vel[3] = (vx + vy) + wz * RB_CENTER;  // 右后 (RB)
-
-  // 转换为电机角速度（rad/s）
-  // 关键：线速度 → 轮子角速度 → 电机角速度（考虑减速比）
-  for (int i = 0; i < 4; i++) {
-    // 轮子角速度 = 线速度 / 轮子半径
-    float wheel_omega = wheel_linear_vel[i] / RADIUS_WHEEL;
-    // 电机角速度 = 轮子角速度 × 减速比
-    target_wheel_omega[i] = wheel_omega * REDUCTION_RATIO_WHEEL;
-  }
-}
-
-/**
- * @brief 估算底盘当前速度（优化版）
- * @detail 使用一阶低通滤波平滑速度估算
- *
- * 算法流程：
- * 1. 读取四个电机角速度 → 转换为线速度
- * 2. 应用麦轮逆运动学公式计算底盘速度
- * 3. 一阶低通滤波消除编码器噪声
- *
- * 公式说明：
- *   vx = (-vlf - vrf + vlb + vrb) / 4
- *   vy = (-vlf + vrf - vlb + vrb) / 4
- *   wz = (vlf + vrf + vlb + vrb) / (4×r)
- *   其中 r = sqrt( (L/2)² + (W/2)² )
- */
-static void EstimateChassisVelocity(void) {
-  /* ===== 第一步：电机角速度 → 轮子线速度 ===== */
-  // 转换公式：线速度 = 角速度(rad/s) × 半径
-  // 注意：所有电机均为REVERSE配置，驱动层会取反，应用层需要再取反回来
-  const float speed_to_linear =
-      DEGREE_2_RAD * RADIUS_WHEEL / REDUCTION_RATIO_WHEEL;
-  float rf_linear_vel = -motor_rf->measure.speed_aps * speed_to_linear;
-  float lf_linear_vel = -motor_lf->measure.speed_aps * speed_to_linear;
-  float lb_linear_vel = -motor_lb->measure.speed_aps * speed_to_linear;
-  float rb_linear_vel = -motor_rb->measure.speed_aps * speed_to_linear;
-
-  /* ===== 第二步：麦轮逆运动学解算 ===== */
-  // 计算等效旋转力臂（预计算避免重复计算）
-  // 物理模型：对于45度麦轮，底盘原地旋转时的等效力臂为横向力臂与纵向力臂的绝对值之和
-  static const float rotation_radius = HALF_WHEEL_BASE + HALF_TRACK_WIDTH;
-
-  // 应用逆运动学公式计算瞬时速度
-  const float inv_4 = 0.25f; // 预计算1/4，避免除法
-  float instant_vx =
-      (-lf_linear_vel - rf_linear_vel + lb_linear_vel + rb_linear_vel) * inv_4;
-  float instant_vy =
-      (-lf_linear_vel + rf_linear_vel - lb_linear_vel + rb_linear_vel) * inv_4;
-  float instant_wz =
-      (lf_linear_vel + rf_linear_vel + lb_linear_vel + rb_linear_vel) /
-      (4.0f * rotation_radius);
-
-  /* ===== 第三步：低通滤波平滑噪声 ===== */
-  // 使用一阶低通滤波：y[n] = α×x[n] + (1-α)×y[n-1]
-  // α = 0.85 对应截止频率约30.9Hz（200Hz采样）
-  static float filtered_vx = 0.0f; // 静态变量避免重复初始化
-  static float filtered_vy = 0.0f;
-  static float filtered_wz = 0.0f;
-
-  chassis_estimated_vx = LowPassFilter_Float(
-      instant_vx, chassis_config.kinematics.velocity_lpf_alpha, &filtered_vx);
-  chassis_estimated_vy = LowPassFilter_Float(
-      instant_vy, chassis_config.kinematics.velocity_lpf_alpha, &filtered_vy);
-  chassis_estimated_wz = LowPassFilter_Float(
-      instant_wz, chassis_config.kinematics.velocity_lpf_alpha, &filtered_wz);
-}
-
-/**
- * @brief 计算目标扭矩前馈补偿
- * @param target_wz 目标角速度 (rad/s)
- * @return 前馈扭矩 (N·m)
- * @detail 前馈原理：预估维持角速度所需的基础扭矩
- */
-static inline float CalculateTorqueFeedforward(float target_wz) {
-  return chassis_config.force.torque_feedforward_coeff * target_wz;
-}
-
-/**
- * @brief 速度闭环控制 → 力/扭矩输出（重构版）
- *
- * 控制链路：
- * 目标速度 → PID控制器 → 需求力/扭矩 → 前馈补偿 → 最终输出
- */
-static void VelocityToForceControl(void) {
-  /* ===== 步骤1：更新速度估算 ===== */
-  EstimateChassisVelocity();
-
-  /* ===== 步骤2：获取目标速度 ===== */
-  float target_vx = chassis_vx;
-  float target_vy = chassis_vy;
-  float target_wz = chassis_cmd_recv.wz; // rad/s
-
-  /* ===== 步骤3：PID速度控制 → 力/扭矩 ===== */
-  // PID输出：根据速度误差计算所需的合力(N)和扭矩(N·m)
-  force_x = PIDCalculate(&chassis_force_x_pid, chassis_estimated_vx, target_vx);
-  force_y = PIDCalculate(&chassis_force_y_pid, chassis_estimated_vy, target_vy);
-  float torque_feedback =
-      PIDCalculate(&chassis_torque_pid, chassis_estimated_wz, target_wz);
-
-  /* ===== 步骤4：前馈补偿 ===== */
-  // 前馈减少PID负担，提高响应速度
-  float torque_feedforward = CalculateTorqueFeedforward(target_wz);
-
-  /* ===== 步骤5：合成最终输出 ===== */
-  torque_z = torque_feedback + torque_feedforward;
-
-  /* ===== 步骤6：限幅保护 ===== */
-  force_x = float_constrain(force_x, -MAX_CONTROL_FORCE, MAX_CONTROL_FORCE);
-  force_y = float_constrain(force_y, -MAX_CONTROL_FORCE, MAX_CONTROL_FORCE);
-  torque_z = float_constrain(torque_z, -MAX_CONTROL_TORQUE, MAX_CONTROL_TORQUE);
-}
-/**
- * @brief 力的动力学逆解算（力控核心环节2）
- * @note  将底盘合力(Fx, Fy)与合扭矩(Tz)分配到各个轮子。
- *
- * 物理公式映射（必须与正运动学解算完全对称）：
- *   F_RF = (-Fx + Fy) / 4 + Tz / (4 * RF_CENTER)
- *   F_LF = (-Fx - Fy) / 4 + Tz / (4 * LF_CENTER)
- *   F_LB = ( Fx - Fy) / 4 + Tz / (4 * LB_CENTER)
- *   F_RB = ( Fx + Fy) / 4 + Tz / (4 * RB_CENTER)
- *
- * 修复说明：已弃用统一的rotation_radius，改为使用各轮独立力臂(XX_CENTER)，
- * 并且使用正确的曼哈顿距离(Lx+Ly)作为力臂，消除旋转时的非对称抖动。
- */
-static void ForceDynamicsInverseResolution() {
-  // RF (0)
-  wheel_force[0] = (-force_x + force_y) / 4.0f + torque_z / (4.0f * RF_CENTER);
-  // LF (1)
-  wheel_force[1] = (-force_x - force_y) / 4.0f + torque_z / (4.0f * LF_CENTER);
-  // LB (2)
-  wheel_force[2] = (force_x - force_y) / 4.0f + torque_z / (4.0f * LB_CENTER);
-  // RB (3)
-  wheel_force[3] = (force_x + force_y) / 4.0f + torque_z / (4.0f * RB_CENTER);
-}
-
-/**
- * @brief 计算速度反馈补偿电流
- * @param target_omega 目标角速度 (rad/s)
- * @param actual_omega 实际角速度 (rad/s)
- * @param motor_index 电机索引
- * @return 补偿电流 (A)
- */
-static float CalculateSpeedFeedback(float target_omega, float actual_omega) {
-  // 严格按 robowalker 思路：直接使用目标与实际轮速差做线性补偿
-  return wheel_speed_feedback_gain * (target_omega - actual_omega);
-}
-
-/**
- * @brief 计算摩擦补偿电流 (修复版)
- * @param target_omega 目标角速度 (rad/s)
- * @return 摩擦补偿电流 (A)
- * @detail 修复了零速时输出非零电流的问题，使用tanh作为软开关
- */
-static inline float CalculateFrictionCompensation(float target_omega,
-                                                  float actual_omega,
-                                                  uint8_t motor_index) {
-  float dynamic_resistance_current =
-      wheel_dynamic_resistance_current[motor_index];
-
-  // 严格按 robowalker 思路：目标轮速决定符号，实际轮速负责零点连续化
-  if (target_omega > wheel_resistance_omega_threshold) {
-    return dynamic_resistance_current;
-  } else if (target_omega < -wheel_resistance_omega_threshold) {
-    return -dynamic_resistance_current;
-  } else {
-    return actual_omega / wheel_resistance_omega_threshold *
-           dynamic_resistance_current;
-  }
-}
-
-/**
- * @brief 力→电流转换（重构版）
- *
- * 处理流程：
- * 1. 基础力→电流转换
- * 2. 速度反馈补偿
- * 3. 摩擦补偿
- * 4. 限幅保护
- */
-// 调试力矩 PID 时可能会临时注释调用点，保留 unused 标记以避免 -Werror 中断编译
-static void __attribute__((unused)) ForceToCurrentConversion(void) {
-  // 电机数组（不能使用static const，因为motor_lf等是运行时初始化的）
-  DJIMotorInstance *motors[4] = {motor_rf, motor_lf, motor_lb, motor_rb};
-
-  // 预计算转换系数，避免重复计算
-  static const float force_to_current = RADIUS_WHEEL / M3508_TORQUE_CONSTANT;
-
-  for (int i = 0; i < 4; i++) {
-    /* ===== 步骤1：基础力→电流转换 ===== */
-    // 公式：电流 = 力 × 半径 / 转矩常数
-    float base_current = wheel_force[i] * force_to_current;
-
-    /* ===== 步骤2：获取实际角速度 ===== */
-    // 电机数组顺序：{RF, LF, LB, RB}
-    // 电机方向配置：RF=REVERSE, LF=REVERSE, LB=REVERSE, RB=REVERSE
-    // REVERSE电机：驱动层已取反，应用层需要再取反回来
-    float actual_omega_raw = motors[i]->measure.speed_aps * DEGREE_2_RAD;
-    float actual_omega;
-    // 所有电机都是REVERSE，统一取反
-    actual_omega = -actual_omega_raw;
-
-    /* ===== 步骤3：速度反馈补偿 ===== */
-    float speed_feedback =
-        CalculateSpeedFeedback(target_wheel_omega[i], actual_omega);
-
-    /* ===== 步骤4：摩擦补偿 ===== */
-    float friction_comp = CalculateFrictionCompensation(target_wheel_omega[i],
-                                                        actual_omega, i);
-
-    /* ===== 步骤5：合成总电流 ===== */
-    wheel_current[i] = base_current + speed_feedback + friction_comp;
-
-    /* ===== 步骤6：限幅保护 ===== */
-    wheel_current[i] = float_constrain(wheel_current[i], -MAX_WHEEL_CURRENT,
-                                       MAX_WHEEL_CURRENT);
-  }
-}
-
-/* 机器人底盘控制核心任务 */
-static void ResetPIDRuntimeState(PIDInstance *pid) {
-  if (pid == NULL) {
-    return;
-  }
-
-  pid->Measure = 0.0f;
-  pid->Last_Measure = 0.0f;
-  pid->Err = 0.0f;
-  pid->Last_Err = 0.0f;
-  pid->Last_ITerm = 0.0f;
-  pid->Pout = 0.0f;
-  pid->Iout = 0.0f;
-  pid->Dout = 0.0f;
-  pid->ITerm = 0.0f;
-  pid->Output = 0.0f;
-  pid->Last_Output = 0.0f;
-  pid->Last_Dout = 0.0f;
-  pid->Ref = 0.0f;
-  pid->dt = 0.0f;
-  pid->ERRORHandler.ERRORCount = 0U;
-  pid->ERRORHandler.ERRORType = PID_ERROR_NONE;
-  DWT_GetDeltaT(&pid->DWT_CNT);
-}
-
-static void ResetChassisControlState(void) {
-  ResetPIDRuntimeState(&chassis_follow_pid);
-  ResetPIDRuntimeState(&chassis_force_x_pid);
-  ResetPIDRuntimeState(&chassis_force_y_pid);
-  ResetPIDRuntimeState(&chassis_torque_pid);
-
-  chassis_estimated_vx = 0.0f;
-  chassis_estimated_vy = 0.0f;
-  chassis_estimated_wz = 0.0f;
-  force_x = 0.0f;
-  force_y = 0.0f;
-  torque_z = 0.0f;
-  chassis_vx = 0.0f;
-  chassis_vy = 0.0f;
-
-  memset(wheel_force, 0, sizeof(wheel_force));
-  memset(wheel_current, 0, sizeof(wheel_current));
-  memset(target_wheel_omega, 0, sizeof(target_wheel_omega));
+static void ResetFollowPidRuntimeState(void) {
+  chassis_follow_pid.Measure = 0.0f;
+  chassis_follow_pid.Last_Measure = 0.0f;
+  chassis_follow_pid.Err = 0.0f;
+  chassis_follow_pid.Last_Err = 0.0f;
+  chassis_follow_pid.Last_ITerm = 0.0f;
+  chassis_follow_pid.Pout = 0.0f;
+  chassis_follow_pid.Iout = 0.0f;
+  chassis_follow_pid.Dout = 0.0f;
+  chassis_follow_pid.ITerm = 0.0f;
+  chassis_follow_pid.Output = 0.0f;
+  chassis_follow_pid.Last_Output = 0.0f;
+  chassis_follow_pid.Last_Dout = 0.0f;
+  chassis_follow_pid.Ref = 0.0f;
+  chassis_follow_pid.dt = 0.0f;
+  chassis_follow_pid.ERRORHandler.ERRORCount = 0U;
+  chassis_follow_pid.ERRORHandler.ERRORType = PID_ERROR_NONE;
+  DWT_GetDeltaT(&chassis_follow_pid.DWT_CNT);
 }
 
 void ChassisTask() {
@@ -1007,10 +527,7 @@ void ChassisTask() {
   SubGetMessage(chassis_sub, &chassis_cmd_recv);
 #endif
 #ifdef CHASSIS_BOARD
-  comm_online =
-      (chassis_can_fast_comm != NULL) ? CANCommIsOnline(chassis_can_fast_comm)
-                                      : 0U;
-  UpdateChassisCommandFromCan();
+  comm_online = ChassisCanLinkUpdateCommand(&chassis_cmd_recv);
   if (!comm_online) {
     // 双板链路失联：强制零力并清零速度，禁止沿用旧指令
     chassis_cmd_recv.chassis_mode = CHASSIS_ZERO_FORCE;
@@ -1042,7 +559,8 @@ void ChassisTask() {
     DJIMotorSetRef(motor_rf, 0.0f);
     DJIMotorSetRef(motor_lb, 0.0f);
     DJIMotorSetRef(motor_rb, 0.0f);
-    ResetChassisControlState();
+    ResetFollowPidRuntimeState();
+    ChassisForceControlReset();
     goto feedback_only;
   }
 
@@ -1087,30 +605,17 @@ void ChassisTask() {
   static float sin_theta, cos_theta;
   cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
   sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-  chassis_vx =
+  float chassis_vx =
       chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
-  chassis_vy =
+  float chassis_vy =
       chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
 
   /* ================== 力控策略控制流程 ================== */
-  // 参考robowalker的力控思想，实现从速度到电流的完整链路
+  ChassisForceControlSetCommand(chassis_vx, chassis_vy, chassis_cmd_recv.wz);
+  ChassisForceControlStep();
 
-  // 0. 正运动学解算：计算各轮目标角速度（用于速度内环）
-  //    robowalker的关键：提供轮速目标值用于动态补偿
-  MecanumKinematicsCalculate();
-
-  // 1. 速度闭环 → 力/扭矩 (力控核心环节1)
-  //    速度控制器输出的不是速度参考值，而是需要的合力和合扭矩
-  //    统一处理：所有模式的wz（角速度）都通过chassis_torque_pid转换为扭矩
-  VelocityToForceControl();
-
-  // 2. 力的动力学逆解算 (力控核心环节2)
-  //    将底盘合力分配到各个轮子
-  ForceDynamicsInverseResolution();
-
-  // 3. 力→电流转换 + 速度内环 + 摩擦补偿 (力控核心环节3)
-  //    robowalker核心：base_current + speed_feedback + friction_comp
-  ForceToCurrentConversion();
+  const float *wheel_current = ChassisForceControlGetWheelCurrent();
+  const float *target_wheel_omega = ChassisForceControlGetTargetWheelOmega();
 
 #if POWER_CONTROLLER_ENABLE
   // 4. 功率限制（必须在发送电机指令前执行）
@@ -1317,6 +822,6 @@ feedback_only:
   PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
 #endif
 #ifdef CHASSIS_BOARD
-  SendChassisFeedbackCanIfDue();
+  ChassisCanLinkSendFeedbackIfDue(&chassis_feedback_data);
 #endif // CHASSIS_BOARD
 }

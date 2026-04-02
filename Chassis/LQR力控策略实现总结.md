@@ -6,6 +6,16 @@
 1. **robowalker2024**的力控思想（速度→力→电流的控制链路）
 2. **Gimbal LQR**的最优控制算法（替代PID实现更优性能）
 
+> 2026-04-03 架构调整说明：
+> 底盘应用层已做瘦身，原本放在 `Chassis/application/chassis/chassis.c`
+> 中的力控控制核已经迁移到
+> `Chassis/modules/algorithm/chassis_force_control.c`，
+> 双板 CAN 桥接逻辑迁移到
+> `Chassis/modules/can_comm/chassis_can_link.c`。
+> 下文中提到的 `EstimateChassisVelocity()`、
+> `VelocityToForceControl()`、`ForceDynamicsInverseResolution()`、
+> `ForceToCurrentConversion()` 仍然存在，但归属位置已变化。
+
 ## 📊 技术路线对比
 
 ### 传统速控策略 (原Chassis)
@@ -117,14 +127,18 @@
 
 ### 3. 应用层集成
 
+**`Chassis/modules/algorithm/chassis_force_control.c`**
+- ✅ 实现 `EstimateChassisVelocity()` - 速度估算
+- ✅ 实现 `VelocityToForceControl()` - 速度到力/扭矩
+- ✅ 实现 `ForceDynamicsInverseResolution()` - 力分配
+- ✅ 实现 `ForceToCurrentConversion()` - 力→电流转换
+
 **`Chassis/application/chassis/chassis.c`**
-- ✅ 声明3个LQR实例（force_x, force_y, torque）
-- ✅ 实现`EstimateChassisVelocity()` - 速度估算
-- ✅ 修改`VelocityToForceControl()` - 用LQR替换PID
-- ✅ 实现`ForceDynamicsInverseResolution()` - 力分配
-- ✅ 实现`ForceToCurrentConversion()` - 力→电流转换
-- ✅ 修改`ChassisInit()` - 初始化LQR
-- ✅ 修改`ChassisTask()` - 集成完整流程
+- ✅ 保留 `ChassisInit()` / `ChassisTask()` 编排入口
+- ✅ 负责控制模式选择、坐标投影、功率控制调用与反馈收尾
+
+**`Chassis/modules/can_comm/chassis_can_link.c`**
+- ✅ 承接双板 CAN 命令接收与反馈发包
 
 ### 4. 工具和文档
 
@@ -655,4 +669,3 @@ if (predicted_power > limit) {
 - **HNU YueLu EC** - 基础框架
 
 **祝您的机器人控制性能卓越！🏆**
-
