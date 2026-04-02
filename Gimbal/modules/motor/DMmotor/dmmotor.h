@@ -30,6 +30,11 @@ typedef enum {
   DM_MODE_PVT = 4,
 } DM_Mode_e;
 
+typedef enum {
+  DM_MIT_PROFILE_MANUAL = 0,
+  DM_MIT_PROFILE_VISION = 1,
+} DM_MIT_Profile_e;
+
 typedef struct {
   uint8_t motor_id;
   uint8_t motor_state;
@@ -77,6 +82,9 @@ typedef struct {
   uint8_t use_mit_full_command;
   float mit_default_stiffness_kp;
   float mit_default_damping_kd;
+  DM_MIT_Profile_s mit_manual_profile;
+  DM_MIT_Profile_s mit_vision_profile;
+  DM_MIT_Profile_e active_mit_profile;
 
   /* MIT 五元组目标：角度/速度/力矩/刚度/阻尼 */
   float mit_target_angle_rad;
@@ -127,5 +135,7 @@ void DMMotorCaliEncoder(DMMotorInstance *motor);
 void DMMotorControlInit();
 void DMMotorSetMITVelocity(DMMotorInstance *motor, float omega, float torque_ff,
                            float kd);
+void DMMotorSelectMITProfile(DMMotorInstance *motor, DM_MIT_Profile_e profile);
+void DMMotorSetMITTargetByProfile(DMMotorInstance *motor, float angle);
 
 #endif // DMMOTOR_H

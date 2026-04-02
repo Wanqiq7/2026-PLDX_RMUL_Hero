@@ -235,13 +235,6 @@ typedef struct { // 云台角度控制
   float chassis_rotate_wz;
 
   gimbal_mode_e gimbal_mode;
-
-
-  uint8_t
-      vision_yaw_direct; // 是否使用视觉Yaw电流直接控制
-  float vision_yaw_current;    // 视觉Yaw电流指令 [raw]
-  uint8_t vision_pitch_direct; // 是否使用视觉Pitch目标
-  float vision_pitch_ref;      // 视觉Pitch目标角度 [rad]
 } Gimbal_Ctrl_Cmd_s;
 
 

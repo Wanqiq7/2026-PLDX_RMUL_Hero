@@ -95,6 +95,16 @@ DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config);
 void DJIMotorSetRef(DJIMotorInstance *motor, float ref);
 
 /**
+ * @brief 设置电机原始输出参考值
+ *
+ * @param motor 要设置的电机
+ * @param raw_ref 期望发送到CAN的原始电流值
+ *
+ * @note  该接口用于 OPEN_LOOP 原始输出场景，会自动补偿电机层内部的方向处理
+ */
+void DJIMotorSetRawRef(DJIMotorInstance *motor, float raw_ref);
+
+/**
  * @brief 切换反馈的目标来源,如将角速度和角度的来源换为IMU(小陀螺模式常用)
  *
  * @param motor 要切换反馈数据来源的电机
@@ -132,10 +142,10 @@ void DJIMotorEnable(DJIMotorInstance *motor);
 void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop);
 
 /**
- * @brief 切换电机控制器类型（PID或LQR）
+ * @brief 切换电机控制器类型（PID/LQR/FC）
  *
  * @param motor 要切换控制器的电机实例指针
- * @param controller_type 控制器类型 (CONTROLLER_PID 或 CONTROLLER_LQR)
+ * @param controller_type 控制器类型
  *
  * @note  切换到LQR模式前，需要确保：
  *        1. 已在初始化时配置好LQR参数

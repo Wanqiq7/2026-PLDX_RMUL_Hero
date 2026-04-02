@@ -98,6 +98,41 @@ static DM_MIT_Limit_s DMMotorResolveLimit(const DM_MIT_Config_s *mit_cfg) {
   return limit;
 }
 
+static uint8_t DMMotorProfileIsZero(const DM_MIT_Profile_s *profile) {
+  if (profile == NULL) {
+    return 1U;
+  }
+
+  return (profile->kp == 0.0f && profile->kd == 0.0f &&
+          profile->v_des == 0.0f && profile->torque_des == 0.0f)
+             ? 1U
+             : 0U;
+}
+
+static DM_MIT_Profile_s
+DMMotorResolveMITProfile(const DM_MIT_Config_s *mit_cfg, uint8_t use_vision) {
+  DM_MIT_Profile_s manual_profile = {
+      .kp = (mit_cfg != NULL) ? mit_cfg->default_kp : 0.0f,
+      .kd = (mit_cfg != NULL) ? mit_cfg->default_kd : 0.0f,
+      .v_des = 0.0f,
+      .torque_des = 0.0f,
+  };
+  DM_MIT_Profile_s vision_profile = manual_profile;
+
+  if (mit_cfg == NULL) {
+    return use_vision ? vision_profile : manual_profile;
+  }
+
+  if (!DMMotorProfileIsZero(&mit_cfg->manual_profile)) {
+    manual_profile = mit_cfg->manual_profile;
+  }
+  if (!DMMotorProfileIsZero(&mit_cfg->vision_profile)) {
+    vision_profile = mit_cfg->vision_profile;
+  }
+
+  return use_vision ? vision_profile : manual_profile;
+}
+
 static inline uint32_t DMMotorTargetStdId(const DMMotorInstance *motor) {
   return motor->command_tx_id + (motor->use_pvt_command_frame ? 0x300u : 0u);
 }
@@ -189,6 +224,9 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config) {
   motor->mit_default_stiffness_kp = config->mit_config.default_kp;
   motor->mit_default_damping_kd = config->mit_config.default_kd;
   motor->cascade_damping_kd = config->mit_config.default_kd;
+  motor->mit_manual_profile = DMMotorResolveMITProfile(&config->mit_config, 0U);
+  motor->mit_vision_profile = DMMotorResolveMITProfile(&config->mit_config, 1U);
+  motor->active_mit_profile = DM_MIT_PROFILE_MANUAL;
 
   motor->mit_limit = DMMotorResolveLimit(&config->mit_config);
   motor->drive_mode = DM_MODE_MIT;
@@ -280,6 +318,29 @@ void DMMotorSetMITTargets(DMMotorInstance *motor, float angle, float omega,
   motor->mit_target_stiffness_kp = kp;
   motor->mit_target_damping_kd = kd;
   motor->mit_torque_fallback_nm = torque;
+}
+
+void DMMotorSelectMITProfile(DMMotorInstance *motor, DM_MIT_Profile_e profile) {
+  if (!motor) {
+    return;
+  }
+
+  motor->active_mit_profile = profile;
+}
+
+void DMMotorSetMITTargetByProfile(DMMotorInstance *motor, float angle) {
+  DM_MIT_Profile_s *profile = NULL;
+
+  if (!motor) {
+    return;
+  }
+
+  profile = (motor->active_mit_profile == DM_MIT_PROFILE_VISION)
+                ? &motor->mit_vision_profile
+                : &motor->mit_manual_profile;
+
+  DMMotorSetMITTargets(motor, angle, profile->v_des, profile->torque_des,
+                       profile->kp, profile->kd);
 }
 
 void DMMotorSetMITVelocity(DMMotorInstance *motor, float omega, float torque_ff,

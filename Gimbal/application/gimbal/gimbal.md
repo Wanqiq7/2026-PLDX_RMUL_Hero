@@ -11,6 +11,46 @@
 5. 设置反馈数据，包括yaw电机的绝对角度和imu数据
 6. 推送反馈数据到gimbal_feed话题下
 
+## 当前控制主链路
+
+详细使用方式请结合：
+
+- `Yaw准力矩直控使用说明.md`
+- `达妙电机使用指南.md`
+- `LQR集成到Gimbal使用说明.md`
+
+### Yaw 轴（GM6020）
+
+当前 `GIMBAL_GYRO_MODE` 与 `GIMBAL_AUTOAIM_MODE` 下，Yaw 轴统一采用“准力矩直控”主链路：
+
+1. 目标角度变化率估计得到目标角速度前馈
+2. 角度误差生成角速度参考
+3. 角速度误差生成电流指令
+4. 将 `yaw_motor` 切换为 `OPEN_LOOP`，由 DJI 电机库仅负责组帧发送
+
+这条链路的控制语义是：
+
+```text
+目标角度 -> 角速度参考 -> 电流/力矩指令
+```
+
+不再将角度参考直接交给电机内部串级 PID，从而让手动与自瞄回退路径共享同一套 Yaw 控制语义，减小模式切换突变。
+
+### Pitch 轴（DM, MIT）
+
+Pitch 轴保持达妙 MIT 五元组接口，但 profile 已下沉到 `DMmotor`：
+
+```text
+选择 profile -> DMMotorSelectMITProfile()
+目标角度 -> DMMotorSetMITTargetByProfile()
+```
+
+`gimbal.c` 现在只负责在手动/视觉之间切换 Pitch profile，并给出目标角度；MIT 五元组的默认参数由 `DMmotor` 实例持有。
+
+### LQR 模式
+
+`GIMBAL_LQR_MODE` 仍保留为独立模式。进入该模式时，Yaw 轴恢复电机库的非直控配置，并切换到 `CONTROLLER_LQR`。
+
 ## 系统辨识功能使用说明
 
 本模块提供了云台电机系统辨识功能，用于采集电机的频率响应数据，以便进行系统建模和PID控制器参数整定。
@@ -44,7 +84,7 @@
 - 速度环响应不理想，需要重新优化参数
 
 **注意事项：**
-- 需要实现 `DJIMotorSetDirectCurrent()` 函数以支持直接电流控制
+- 需要实现 `DJIMotorSetRawRef()` 函数以支持 OPEN_LOOP 原始电流控制
 - 建议幅值从小开始尝试，避免电机过载
 - 如果电机震动剧烈，立即停止并降低幅值
 
@@ -346,7 +386,7 @@ SystemID_Init(SYS_ID_MODE_OFF);
 - 延长扫频时间以提高频率分辨率
 
 **问题4：辨识结果不理想**
-- 确保速度环辨识时实现了 `DJIMotorSetDirectCurrent()` 函数
+- 确保速度环辨识时实现了 `DJIMotorSetRawRef()` 函数
 - 角度环辨识前先确保速度环已整定好
 - 检查传感器反馈是否准确（IMU、编码器）
 

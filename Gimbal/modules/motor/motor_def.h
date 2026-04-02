@@ -63,6 +63,7 @@ typedef enum {
 typedef enum {
   CONTROLLER_PID = 0, // 使用PID控制器（默认）
   CONTROLLER_LQR = 1, // 使用LQR控制器
+  CONTROLLER_FC = 2,  // 使用力控控制器（Force Control）
 } Controller_Type_e;
 
 typedef enum {
@@ -94,9 +95,18 @@ typedef struct {
 } DM_MIT_State_s;
 
 typedef struct {
+  float kp;
+  float kd;
+  float v_des;
+  float torque_des;
+} DM_MIT_Profile_s;
+
+typedef struct {
   DM_MIT_Limit_s limit;
   float default_kp;
   float default_kd;
+  DM_MIT_Profile_s manual_profile;
+  DM_MIT_Profile_s vision_profile;
   uint8_t auto_clear_error;
   uint8_t auto_enter_mode;
 } DM_MIT_Config_s;
@@ -121,6 +131,32 @@ typedef struct {
 
 } Motor_Control_Setting_s;
 
+/* 力控控制器初始化参数 */
+typedef struct {
+  float angle_loop_kp;
+  float angle_loop_ki;
+  float rate_loop_kp;
+  float rate_loop_ki;
+  float rate_ref_max;
+  float current_cmd_max;
+  float target_rate_ff_gain;
+  float target_rate_lpf_alpha;
+  float angle_err_integral_limit;
+  float rate_err_integral_limit;
+} FC_Init_Config_s;
+
+/* 力控控制器运行时状态 */
+typedef struct {
+  float angle_err_integral;
+  float rate_err_integral;
+  float current_cmd;
+  float target_rate_est;
+  float current_feedforward;
+  float last_target_angle_rad;
+  uint32_t dwt_cnt;
+  uint8_t inited;
+} FC_State_s;
+
 /* 电机控制器,包括其他来源的反馈数据指针,3环控制器和电机的参考输入*/
 // 后续增加前馈数据指针
 typedef struct {
@@ -134,6 +170,8 @@ typedef struct {
   PIDInstance angle_PID;
 
   LQRInstance LQR; // LQR控制器实例
+  FC_Init_Config_s fc_param;
+  FC_State_s fc_state;
 
   float pid_ref; // 将会作为每个环的输入和输出顺次通过串级闭环
   float output;  // 控制器最终输出（供LQR等直接控制使用）
@@ -165,6 +203,7 @@ typedef struct {
   PID_Init_Config_s speed_PID;
   PID_Init_Config_s angle_PID;
   LQR_Init_Config_s LQR; // LQR控制器初始化配置
+  FC_Init_Config_s fc;   // 力控控制器初始化配置
 } Motor_Controller_Init_s;
 
 /* 用于初始化CAN电机的结构体,各类电机通用 */

@@ -1,6 +1,7 @@
 #include "dji_motor.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include "fc_controller.h"
 #include "general_def.h"
 
 static uint8_t idx = 0; // register idx,是该文件的全局电机索引,在注册时使用
@@ -8,6 +9,19 @@ static uint8_t idx = 0; // register idx,是该文件的全局电机索引,在注
  */
 static DJIMotorInstance *dji_motor_instance[DJI_MOTOR_CNT] = {
     NULL}; // 会在control任务中遍历该指针数组进行pid计算
+
+static float DJIMotorGetRawRefSign(const DJIMotorInstance *motor) {
+  float sign = 1.0f;
+
+  if (motor->motor_settings.motor_reverse_flag == MOTOR_DIRECTION_REVERSE) {
+    sign *= -1.0f;
+  }
+  if (motor->motor_settings.feedback_reverse_flag ==
+      FEEDBACK_DIRECTION_REVERSE) {
+    sign *= -1.0f;
+  }
+  return sign;
+}
 
 /**
  * @brief
@@ -215,6 +229,9 @@ DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config) {
           &config->controller_param_init_config.angle_PID);
   LQRInit(&instance->motor_controller.LQR,
           &config->controller_param_init_config.LQR);
+  instance->motor_controller.fc_param =
+      config->controller_param_init_config.fc;
+  FCInit(&instance->motor_controller.fc_state);
   instance->motor_controller.other_angle_feedback_ptr =
       config->controller_param_init_config.other_angle_feedback_ptr;
   instance->motor_controller.other_speed_feedback_ptr =
@@ -265,6 +282,7 @@ void DJIMotorStop(DJIMotorInstance *motor) {
   PIDReset(&motor->motor_controller.current_PID);
   PIDReset(&motor->motor_controller.speed_PID);
   PIDReset(&motor->motor_controller.angle_PID);
+  FCReset(&motor->motor_controller.fc_state, 0.0f);
 }
 
 void DJIMotorEnable(DJIMotorInstance *motor) {
@@ -289,17 +307,34 @@ void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop) {
 /* 切换电机控制器类型（PID或LQR） */
 void DJIMotorChangeController(DJIMotorInstance *motor,
                               Controller_Type_e controller_type) {
+  if (motor->motor_settings.controller_type == controller_type) {
+    return;
+  }
+
+  if (motor->motor_settings.controller_type == CONTROLLER_FC) {
+    FCReset(&motor->motor_controller.fc_state, 0.0f);
+  }
+
   motor->motor_settings.controller_type = controller_type;
 
-  // 切换到LQR时，清除积分项，避免PID残留影响
   if (controller_type == CONTROLLER_LQR) {
     LQRReset(&motor->motor_controller.LQR);
+  } else if (controller_type == CONTROLLER_FC) {
+    FCReset(&motor->motor_controller.fc_state, motor->motor_controller.pid_ref);
+  } else {
+    PIDReset(&motor->motor_controller.current_PID);
+    PIDReset(&motor->motor_controller.speed_PID);
+    PIDReset(&motor->motor_controller.angle_PID);
   }
 }
 
 // 设置参考值
 void DJIMotorSetRef(DJIMotorInstance *motor, float ref) {
   motor->motor_controller.pid_ref = ref;
+}
+
+void DJIMotorSetRawRef(DJIMotorInstance *motor, float raw_ref) {
+  motor->motor_controller.pid_ref = raw_ref * DJIMotorGetRawRefSign(motor);
 }
 
 // 为所有电机实例计算三环PID,发送控制报文
@@ -374,6 +409,40 @@ void DJIMotorControl() {
 
       // 保存输出到controller，供调试使用
       motor_controller->output = lqr_current_output;
+    }
+    // ==================== FC控制器分支 ====================
+    else if (motor_setting->controller_type == CONTROLLER_FC) {
+      float angle_feedback;
+      float velocity_feedback;
+      float fc_current_output;
+      float dt;
+
+      if (motor_setting->angle_feedback_source == OTHER_FEED) {
+        angle_feedback = *motor_controller->other_angle_feedback_ptr;
+      } else {
+        angle_feedback = measure->total_angle;
+      }
+
+      if (motor_setting->speed_feedback_source == OTHER_FEED) {
+        velocity_feedback = *motor_controller->other_speed_feedback_ptr;
+      } else {
+        velocity_feedback = measure->speed_aps;
+      }
+
+      dt = DWT_GetDeltaT(&motor_controller->fc_state.dwt_cnt);
+
+      fc_current_output =
+          FCCalculate(&motor_controller->fc_param, &motor_controller->fc_state,
+                      pid_ref, angle_feedback, velocity_feedback, dt);
+
+      if (fc_current_output > 16384.0f) {
+        fc_current_output = 16384.0f;
+      } else if (fc_current_output < -16384.0f) {
+        fc_current_output = -16384.0f;
+      }
+
+      set = (int16_t)fc_current_output;
+      motor_controller->output = fc_current_output;
     }
     // ==================== PID控制器分支（原有逻辑）====================
     else // CONTROLLER_PID

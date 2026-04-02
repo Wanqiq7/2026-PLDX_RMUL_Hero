@@ -714,10 +714,6 @@ static void ApplyRobotStopOutputs(void) {
   cmd_force_safe_fire = 1U;
 
   gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-  gimbal_cmd_send.vision_yaw_direct = 0;
-  gimbal_cmd_send.vision_pitch_direct = 0;
-  gimbal_cmd_send.vision_yaw_current = 0.0f;
-  gimbal_cmd_send.vision_pitch_ref = 0.0f;
 
   chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
   chassis_cmd_send.vx = 0.0f;
@@ -1386,10 +1382,6 @@ static void VisionControlSet() {
   const uint8_t vision_takeover =
       (autoaim_mode && vision_data_recv.vision_takeover) ? 1U : 0U;
 
-  // 默认清除视觉直接控制标志
-  gimbal_cmd_send.vision_yaw_direct = 0;
-  gimbal_cmd_send.vision_pitch_direct = 0;
-
   // 退出自瞄或视觉未接管时，立即清除视觉触发的拨弹命令
   if (!autoaim_mode) {
     if (vision_autoaim_last && !cmd_input_active.mouse.press_l) {
@@ -1404,16 +1396,6 @@ static void VisionControlSet() {
     vision_autoaim_last = 1U;
     return;
   }
-
-  // 传递视觉控制器计算好的控制量给云台
-  gimbal_cmd_send.vision_yaw_direct = 1;
-  gimbal_cmd_send.vision_yaw_current = vision_data_recv.yaw_current_cmd;
-  gimbal_cmd_send.vision_pitch_direct = 1;
-  gimbal_cmd_send.vision_pitch_ref = vision_data_recv.pitch_ref_limited;
-
-  // 注意：不在 cmd 层覆盖云台角度目标，避免在“视觉丢目标/无目标”时
-  //      云台目标角从视觉单圈角跳回导致突跳。
-  //      云台自瞄接管在 gimbal 层实现（Yaw 视觉双环，Pitch 参考限速）。
 
   // 视觉驱动发射（仅在开启自动开火时生效）
   if (cmd_auto_fire_shot_pulse) {
