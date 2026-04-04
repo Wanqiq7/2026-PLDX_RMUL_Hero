@@ -38,14 +38,17 @@
 
 ### Pitch 轴（DM, MIT）
 
-Pitch 轴保持达妙 MIT 五元组接口，但 profile 已下沉到 `DMmotor`：
+Pitch 轴当前主线已调整为“模块内串级 PID -> torque-only MIT”：
 
 ```text
-选择 profile -> DMMotorSelectMITProfile()
-目标角度 -> DMMotorSetMITTargetByProfile()
+Pitch_ref / Pitch_feedback / Gyro_feedback
+-> DMMotorSetRef()
+-> angle PID 输出 speed_ref
+-> speed PID 输出 tau_ref
+-> MIT torque-only (angle/velocity/kp/kd 置零)
 ```
 
-`gimbal.c` 现在只负责在手动/视觉之间切换 Pitch profile，并给出目标角度；MIT 五元组的默认参数由 `DMmotor` 实例持有。
+`MIT full / profile / PVT` 仍然保留在 `DMmotor` 中，作为兼容或扩展能力，不再是 Pitch 常规控制主线。
 
 ### LQR 模式
 

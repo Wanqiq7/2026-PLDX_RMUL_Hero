@@ -52,9 +52,25 @@
 - [x] 回归脚本通过
 - [x] 编译 `Gimbal` Debug 固件通过
 
+### Task 4: Pitch DM MIT 收敛到 torque-only 主线
+
+**Files:**
+- Modify: `Gimbal/application/gimbal/gimbal.c`
+- Modify: `Gimbal/modules/motor/DMmotor/dmmotor.h`
+- Modify: `Gimbal/modules/motor/DMmotor/dmmotor.c`
+- Modify: `Gimbal/application/gimbal/gimbal.md`
+- Modify: `Gimbal/modules/motor/DMmotor/dmmotor.md`
+- Test: `tests/pitch_dm_torque_mainline_regression.ps1`
+
+- [x] `GimbalTask()` 常规路径改用 `DMMotorSetRef(...)`
+- [x] 模块内串级路径改为 `angle PID -> speed PID -> tau_ref`
+- [x] torque-only MIT 默认屏蔽 angle/velocity/kp/kd
+- [x] 回归脚本通过
+- [x] 编译 `Gimbal` Debug 固件通过
+
 ## Chunk 2: 下一批待实施
 
-### Task 4: 清理 Gimbal 上层接线
+### Task 5: 清理 Gimbal 上层接线
 
 **Files:**
 - Modify: `Gimbal/application/gimbal/gimbal.c`
@@ -66,7 +82,7 @@
 - [ ] 把 bypass 接口显式命名并加注释
 - [ ] 重新验证 `AUTOAIM` 与模式切换
 
-### Task 5: 文档同步
+### Task 6: 文档同步
 
 **Files:**
 - Modify: `Gimbal/modules/motor/tau_ref_adapter.md`
@@ -78,7 +94,7 @@
 - [ ] 增加 `LegacyPowerBridge` 说明
 - [ ] 增加 `SetEffort` / `SetRef` 语义边界说明
 
-### Task 6: 第二阶段统一入口清理
+### Task 7: 第二阶段统一入口清理
 
 **Files:**
 - Modify: `Chassis/modules/motor/DJImotor/dji_motor.h`

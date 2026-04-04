@@ -224,7 +224,6 @@ DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config) {
 
   motor->mit_default_stiffness_kp = config->mit_config.default_kp;
   motor->mit_default_damping_kd = config->mit_config.default_kd;
-  motor->cascade_damping_kd = config->mit_config.default_kd;
   motor->mit_manual_profile = DMMotorResolveMITProfile(&config->mit_config, 0U);
   motor->mit_vision_profile = DMMotorResolveMITProfile(&config->mit_config, 1U);
   motor->active_mit_profile = DM_MIT_PROFILE_MANUAL;
@@ -290,7 +289,7 @@ void DMMotorSetMode(DMMotorInstance *motor, DM_Mode_e mode) {
   motor->motor_can_instance->txconf.StdId = prev_id;
 }
 
-void DMMotorSetRef(DMMotorInstance *motor, float angle_deg, float torque_ff) {
+void DMMotorSetRef(DMMotorInstance *motor, float angle_rad, float torque_ff) {
   if (!motor) {
     return;
   }
@@ -299,7 +298,7 @@ void DMMotorSetRef(DMMotorInstance *motor, float angle_deg, float torque_ff) {
   motor->use_mit_velocity_only = 0;
   motor->use_cascade_pid_path = 1;
   motor->use_mit_full_command = 0;
-  motor->cascade_angle_ref_deg = angle_deg;
+  motor->cascade_angle_ref_rad = angle_rad;
   motor->cascade_torque_ff_nm = torque_ff;
 }
 
@@ -423,8 +422,6 @@ void DMMotorTask(void const *argument) {
   DMMotorInstance *motor = (DMMotorInstance *)argument;
   Motor_Control_Setting_s *setting = &motor->motor_settings;
   DMMotor_Send_s motor_send_mailbox;
-  const float speed_limit_deg_max = motor->mit_limit.omega_max * RAD_TO_DEG;
-  const float speed_limit_deg_min = motor->mit_limit.omega_min * RAD_TO_DEG;
 
   while (1) {
     Controller_Effort_Output_s effort_output = {
@@ -505,34 +502,40 @@ void DMMotorTask(void const *argument) {
                       ? motor->mit_target_damping_kd
                       : motor->mit_default_damping_kd;
     } else if (motor->use_cascade_pid_path) {
-      float angle_ref_deg = motor->cascade_angle_ref_deg;
+      float angle_ref_rad = motor->cascade_angle_ref_rad;
       float torque_ff = motor->cascade_torque_ff_nm;
 
-      float angle_feedback_deg = (motor->external_angle_feedback_ptr)
+      float angle_feedback_rad = (motor->external_angle_feedback_ptr)
                                      ? *motor->external_angle_feedback_ptr
                                      : 0.0f;
-      float speed_feedback_deg =
+      float speed_feedback_rad_s =
           (motor->external_speed_feedback_ptr)
-              ? (*motor->external_speed_feedback_ptr) * RAD_TO_DEG
+              ? *motor->external_speed_feedback_ptr
               : 0.0f;
 
-      angle_feedback_deg =
-          DMMotorApplyFeedbackDirection(setting, angle_feedback_deg);
-      speed_feedback_deg =
-          DMMotorApplyFeedbackDirection(setting, speed_feedback_deg);
+      angle_feedback_rad =
+          DMMotorApplyFeedbackDirection(setting, angle_feedback_rad);
+      speed_feedback_rad_s =
+          DMMotorApplyFeedbackDirection(setting, speed_feedback_rad_s);
 
-      float speed_ref_deg =
-          PIDCalculate(&motor->angle_PID, angle_feedback_deg, angle_ref_deg);
-      speed_ref_deg = float_constrain(speed_ref_deg, speed_limit_deg_min,
-                                      speed_limit_deg_max);
+      float speed_ref_rad_s =
+          PIDCalculate(&motor->angle_PID, angle_feedback_rad, angle_ref_rad);
+      speed_ref_rad_s =
+          float_constrain(speed_ref_rad_s, motor->mit_limit.omega_min,
+                          motor->mit_limit.omega_max);
 
-      target_torque = torque_ff;
+      if (motor->external_speed_feedforward_ptr) {
+        speed_ref_rad_s += *motor->external_speed_feedforward_ptr;
+      }
+
+      float torque_ref_nm = PIDCalculate(&motor->speed_PID,
+                                         speed_feedback_rad_s, speed_ref_rad_s);
+
+      target_torque = torque_ref_nm + torque_ff;
       target_angle = 0.0f;
       target_kp = 0.0f;
-      target_velocity = speed_ref_deg * DEG_TO_RAD;
-      target_kd = (motor->cascade_damping_kd > 0.0f)
-                      ? motor->cascade_damping_kd
-                      : motor->mit_default_damping_kd;
+      target_velocity = 0.0f;
+      target_kd = 0.0f;
     } else {
       target_angle = 0.0f;
       target_velocity = 0.0f;

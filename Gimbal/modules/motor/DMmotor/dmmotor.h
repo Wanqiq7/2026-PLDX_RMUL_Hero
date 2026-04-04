@@ -75,9 +75,8 @@ typedef struct {
 
   /* 模块内串级控制缓存 */
   float mit_torque_fallback_nm;
-  float cascade_angle_ref_deg;
+  float cascade_angle_ref_rad;
   float cascade_torque_ff_nm;
-  float cascade_damping_kd;
   uint8_t use_cascade_pid_path;
   uint8_t use_mit_full_command;
   float mit_default_stiffness_kp;
@@ -122,7 +121,7 @@ typedef enum {
 
 DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config);
 
-void DMMotorSetRef(DMMotorInstance *motor, float angle_deg, float torque_ff);
+void DMMotorSetRef(DMMotorInstance *motor, float angle_rad, float torque_ff);
 void DMMotorSetMITTargets(DMMotorInstance *motor, float angle, float omega,
                           float torque, float kp, float kd);
 void DMMotorSetPVT(DMMotorInstance *motor, float pos_rad, float v_limit_rad_s,

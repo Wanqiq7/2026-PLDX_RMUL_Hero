@@ -153,11 +153,39 @@ void GimbalInit() {
           {
               .angle_feedback_source = OTHER_FEED,
               .speed_feedback_source = OTHER_FEED,
-              .outer_loop_type = OPEN_LOOP,
-              .close_loop_type = OPEN_LOOP,
+              .outer_loop_type = ANGLE_LOOP,
+              .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
               .feedforward_flag = FEEDFORWARD_NONE,
               .motor_reverse_flag = MOTOR_DIRECTION_REVERSE,
               .controller_type = CONTROLLER_PID,
+          },
+      .controller_param_init_config =
+          {
+              // Pitch 扭矩主线：角度外环输出角速度参考(rad/s)，
+              // 速度内环输出输出轴扭矩参考(N·m)。
+              .angle_PID =
+                  {
+                      .kp = 20.0f,
+                      .ki = 0.0f,
+                      .kd = 0.0f,
+                      .MaxOut = 12.0f, // 约等于 720 deg/s
+                      .DeadBand = 0.001f,
+                      .Improve = PID_Derivative_On_Measurement |
+                                 PID_DerivativeFilter,
+                      .Derivative_LPF_RC = 0.01f,
+                  },
+              .speed_PID =
+                  {
+                      .kp = 1.15f,
+                      .ki = 0.0f,
+                      .kd = 0.0f,
+                      .MaxOut = 3.0f, // 先按 rmpp 的 3N·m 保守迁移
+                      .DeadBand = 0.0f,
+                      .Improve = PID_Integral_Limit,
+                      .IntegralLimit = 1.5f,
+                  },
+              .other_angle_feedback_ptr = &gimba_IMU_data->Pitch_rad,
+              .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[0],
           },
       .mit_config =
           {
@@ -241,8 +269,7 @@ void GimbalTask() {
     DJIMotorSetRef(yaw_motor, yaw_ref_rad);
     DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
     DMMotorEnable(pitch_motor);
-    DMMotorSelectMITProfile(pitch_motor, DM_MIT_PROFILE_MANUAL);
-    DMMotorSetMITTargetByProfile(pitch_motor, pitch_ref_rad);
+    DMMotorSetRef(pitch_motor, pitch_ref_rad, 0.0f);
     break;
   }
   case GIMBAL_AUTOAIM_MODE: {
@@ -263,12 +290,9 @@ void GimbalTask() {
 
     if (vision_takeover) {
       pitch_ref_rad = vision_data_recv.pitch_ref_limited;
-      DMMotorSelectMITProfile(pitch_motor, DM_MIT_PROFILE_VISION);
-    } else {
-      DMMotorSelectMITProfile(pitch_motor, DM_MIT_PROFILE_MANUAL);
     }
     DMMotorEnable(pitch_motor);
-    DMMotorSetMITTargetByProfile(pitch_motor, pitch_ref_rad);
+    DMMotorSetRef(pitch_motor, pitch_ref_rad, 0.0f);
     break;
   }
   case GIMBAL_LQR_MODE: {
@@ -278,8 +302,7 @@ void GimbalTask() {
     DJIMotorChangeController(yaw_motor, CONTROLLER_LQR);
     DJIMotorSetRef(yaw_motor, yaw_ref_rad);
     DMMotorEnable(pitch_motor);
-    DMMotorSelectMITProfile(pitch_motor, DM_MIT_PROFILE_MANUAL);
-    DMMotorSetMITTargetByProfile(pitch_motor, pitch_ref_rad);
+    DMMotorSetRef(pitch_motor, pitch_ref_rad, 0.0f);
     break;
   }
   case GIMBAL_SYS_ID_CHIRP: {

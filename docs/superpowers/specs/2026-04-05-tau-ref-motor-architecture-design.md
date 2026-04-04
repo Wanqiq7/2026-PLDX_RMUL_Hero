@@ -66,6 +66,11 @@
    - `LQR` 最终输出改为 `TAU_REF`
    - `SMC` 最终输出改为 `TAU_REF`
 
+5. `Pitch DM MIT` 主线收敛为 torque-only
+   - `GimbalTask()` 常规路径改为 `DMMotorSetRef(pitch_ref_rad, torque_ff)`
+   - `DMmotor` 模块内执行 `angle PID -> speed PID -> tau_ref`
+   - MIT 常规下发时默认屏蔽 angle/velocity/kp/kd，只保留 torque 通道
+
 ### 暂未完成
 
 1. `Gimbal` 上层模式链路还未完全显式使用 `SetEffort`
