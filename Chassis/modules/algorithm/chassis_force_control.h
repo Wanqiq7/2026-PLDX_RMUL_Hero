@@ -16,10 +16,10 @@ typedef struct {
   float velocity_lpf_alpha;
   float max_control_force;
   float max_control_torque;
-  float max_wheel_current;
-  float wheel_dynamic_current_default;
+  float max_wheel_tau_ref;
+  float wheel_dynamic_tau_default;
   float wheel_resistance_omega_threshold_default;
-  float wheel_speed_feedback_gain_default;
+  float wheel_speed_feedback_tau_gain_default;
   float torque_constant;
   PID_Init_Config_s force_x_pid_config;
   PID_Init_Config_s force_y_pid_config;
@@ -35,7 +35,7 @@ void ChassisForceControlReset(void);
 void ChassisForceControlSetCommand(float projected_vx, float projected_vy,
                                    float target_wz);
 void ChassisForceControlStep(void);
-const float *ChassisForceControlGetWheelCurrent(void);
+const float *ChassisForceControlGetWheelTauRef(void);
 const float *ChassisForceControlGetTargetWheelOmega(void);
 
 #endif

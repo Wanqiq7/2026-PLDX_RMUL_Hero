@@ -25,16 +25,16 @@ typedef struct {
   float force_y;
   float torque_z;
   float wheel_force[4];
-  float wheel_current[4];
+  float wheel_tau_ref[4];
   float target_wheel_omega[4];
   uint8_t initialized;
 } ChassisForceControlContext_s;
 
 static ChassisForceControlContext_s chassis_force_ctx;
 
-volatile float wheel_dynamic_resistance_current[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+volatile float wheel_dynamic_resistance_tau[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 volatile float wheel_resistance_omega_threshold = 0.0f;
-volatile float wheel_speed_feedback_gain = 0.0f;
+volatile float wheel_speed_feedback_tau_gain = 0.0f;
 
 static void ResetPIDRuntimeState(PIDInstance *pid) {
   if (pid == NULL) {
@@ -181,31 +181,30 @@ static void ForceDynamicsInverseResolution(void) {
 }
 
 static float CalculateSpeedFeedback(float target_omega, float actual_omega) {
-  return wheel_speed_feedback_gain * (target_omega - actual_omega);
+  return wheel_speed_feedback_tau_gain * (target_omega - actual_omega);
 }
 
 static float CalculateFrictionCompensation(float target_omega, float actual_omega,
                                            uint8_t motor_index) {
-  float dynamic_resistance_current =
-      wheel_dynamic_resistance_current[motor_index];
+  float dynamic_resistance_tau = wheel_dynamic_resistance_tau[motor_index];
 
   if (target_omega > wheel_resistance_omega_threshold) {
-    return dynamic_resistance_current;
+    return dynamic_resistance_tau;
   }
   if (target_omega < -wheel_resistance_omega_threshold) {
-    return -dynamic_resistance_current;
+    return -dynamic_resistance_tau;
   }
   return actual_omega / wheel_resistance_omega_threshold *
-         dynamic_resistance_current;
+         dynamic_resistance_tau;
 }
 
-static void ForceToCurrentConversion(void) {
+static void ForceToTorqueEffort(void) {
   static const uint8_t RF = 0U;
-  const float force_to_current =
-      chassis_force_ctx.config.wheel_radius / chassis_force_ctx.config.torque_constant;
 
   for (int i = 0; i < 4; i++) {
-    float base_current = chassis_force_ctx.wheel_force[i] * force_to_current;
+    // 轮端切向力(N)乘轮半径(m)得到输出轴侧扭矩参考(N·m)
+    float base_tau = chassis_force_ctx.wheel_force[i] *
+                     chassis_force_ctx.config.wheel_radius;
     float actual_omega_raw =
         chassis_force_ctx.motors[i]->measure.speed_aps * DEGREE_2_RAD;
     float actual_omega =
@@ -215,12 +214,12 @@ static void ForceToCurrentConversion(void) {
     float friction_comp = CalculateFrictionCompensation(
         chassis_force_ctx.target_wheel_omega[i], actual_omega, (uint8_t)i);
 
-    chassis_force_ctx.wheel_current[i] =
-        base_current + speed_feedback + friction_comp;
-    chassis_force_ctx.wheel_current[i] =
-        float_constrain(chassis_force_ctx.wheel_current[i],
-                        -chassis_force_ctx.config.max_wheel_current,
-                        chassis_force_ctx.config.max_wheel_current);
+    chassis_force_ctx.wheel_tau_ref[i] =
+        base_tau + speed_feedback + friction_comp;
+    chassis_force_ctx.wheel_tau_ref[i] =
+        float_constrain(chassis_force_ctx.wheel_tau_ref[i],
+                        -chassis_force_ctx.config.max_wheel_tau_ref,
+                        chassis_force_ctx.config.max_wheel_tau_ref);
 
     (void)RF;
   }
@@ -258,12 +257,12 @@ void ChassisForceControlInit(const ChassisForceControlConfig_s *config,
   PIDInit(&chassis_force_ctx.torque_pid, &torque_pid_config);
 
   for (int i = 0; i < 4; i++) {
-    wheel_dynamic_resistance_current[i] =
-        config->wheel_dynamic_current_default;
+    wheel_dynamic_resistance_tau[i] =
+        config->wheel_dynamic_tau_default;
   }
   wheel_resistance_omega_threshold =
       config->wheel_resistance_omega_threshold_default;
-  wheel_speed_feedback_gain = config->wheel_speed_feedback_gain_default;
+  wheel_speed_feedback_tau_gain = config->wheel_speed_feedback_tau_gain_default;
 
   chassis_force_ctx.initialized = 1U;
 }
@@ -285,8 +284,8 @@ void ChassisForceControlReset(void) {
   chassis_force_ctx.force_y = 0.0f;
   chassis_force_ctx.torque_z = 0.0f;
   memset(chassis_force_ctx.wheel_force, 0, sizeof(chassis_force_ctx.wheel_force));
-  memset(chassis_force_ctx.wheel_current, 0,
-         sizeof(chassis_force_ctx.wheel_current));
+  memset(chassis_force_ctx.wheel_tau_ref, 0,
+         sizeof(chassis_force_ctx.wheel_tau_ref));
   memset(chassis_force_ctx.target_wheel_omega, 0,
          sizeof(chassis_force_ctx.target_wheel_omega));
 }
@@ -306,11 +305,11 @@ void ChassisForceControlStep(void) {
   MecanumKinematicsCalculate();
   VelocityToForceControl();
   ForceDynamicsInverseResolution();
-  ForceToCurrentConversion();
+  ForceToTorqueEffort();
 }
 
-const float *ChassisForceControlGetWheelCurrent(void) {
-  return chassis_force_ctx.wheel_current;
+const float *ChassisForceControlGetWheelTauRef(void) {
+  return chassis_force_ctx.wheel_tau_ref;
 }
 
 const float *ChassisForceControlGetTargetWheelOmega(void) {

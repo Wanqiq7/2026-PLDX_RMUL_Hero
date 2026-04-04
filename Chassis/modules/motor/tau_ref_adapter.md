@@ -15,7 +15,8 @@ PID / LQR / SMC / legacy output
 
 当前 `Chassis` 已接入：
 
-- DJI 电机：`raw/current -> tau_ref -> raw current`
+- DJI 电机主线：`TAU_REF -> raw current`
+- 功率控制器兼容桥：`tau_ref -> raw current/can cmd -> tau_ref`
 - DM 电机：`tau_ref -> MIT torque`
 
 ## 相关文件
@@ -31,19 +32,20 @@ PID / LQR / SMC / legacy output
 ## 使用原则
 
 1. `app` 层不应该直接拼协议帧。
-2. 控制器若仍输出 `current_A` 或 `raw_current_cmd`，必须通过 `DJI adapter` 内部归一为 `tau_ref`。
-3. `DJI` 默认转矩常数按输出轴扭矩解释：
+2. 新主线中，控制器应尽量直接输出 `TAU_REF`。
+3. `Chassis` 当前通过 `LegacyPowerBridge` 兼容旧功率控制器，current/raw 不再是主线语义。
+4. `DJI` 默认转矩常数按输出轴扭矩解释：
    `GM6020 = 0.741 N·m/A`，`M3508 = 0.3 N·m/A`，`M2006 = 0.18 N·m/A`。
-4. 若 `physical_param` 不完整，`DJIMotorInit()` 会记录错误并保持电机失能，而不是运行期静默输出 0。
-5. 不再维护独立的 `control_effort.h` 或 `motor_effort_normalize.*` 文件，相关概念已压缩进电机层。
-6. 最终发送给电机的命令必须经过 adapter 构建。
+5. 若 `physical_param` 不完整，`DJIMotorInit()` 会记录错误并保持电机失能，而不是运行期静默输出 0。
+6. 不再维护独立的 `control_effort.h` 或 `motor_effort_normalize.*` 文件，相关概念已压缩进电机层。
+7. 最终发送给电机的命令必须经过 adapter 构建。
 
 ## 示例
 
 ```c
 Controller_Effort_Output_s effort = {
-    .semantic = CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
-    .raw_current_cmd = pid_ref,
+    .semantic = CONTROLLER_OUTPUT_TAU_REF,
+    .tau_ref_nm = wheel_tau_ref[i],
 };
 
 Controller_Effort_Output_s normalized = {0};

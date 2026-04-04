@@ -220,6 +220,24 @@ static void DJIMotorLostCallback(void *motor_ptr) {
              motor->motor_can_instance->tx_id);
 }
 
+static float DJIMotorCurrentToTauRef(const Motor_Physical_Param_s *param,
+                                     float current_ref_a) {
+  if (param == NULL || param->torque_constant_nm_per_a <= 0.0f) {
+    return 0.0f;
+  }
+  return current_ref_a * param->torque_constant_nm_per_a;
+}
+
+static float DJIMotorRawCurrentToTauRef(const Motor_Physical_Param_s *param,
+                                        float raw_current_cmd) {
+  if (param == NULL || param->raw_to_current_coeff <= 0.0f ||
+      param->torque_constant_nm_per_a <= 0.0f) {
+    return 0.0f;
+  }
+  return raw_current_cmd * param->raw_to_current_coeff *
+         param->torque_constant_nm_per_a;
+}
+
 // 电机初始化,返回一个电机实例
 DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config) {
   uint8_t physical_param_valid = 0U;
@@ -355,10 +373,27 @@ void DJIMotorChangeController(DJIMotorInstance *motor,
 // 设置参考值
 void DJIMotorSetRef(DJIMotorInstance *motor, float ref) {
   motor->motor_controller.pid_ref = ref;
+  memset(&motor->motor_controller.ref_effort, 0,
+         sizeof(motor->motor_controller.ref_effort));
+}
+
+void DJIMotorSetEffort(DJIMotorInstance *motor,
+                       const Controller_Effort_Output_s *effort) {
+  if (motor == NULL) {
+    return;
+  }
+
+  memset(&motor->motor_controller.ref_effort, 0,
+         sizeof(motor->motor_controller.ref_effort));
+  if (effort != NULL) {
+    motor->motor_controller.ref_effort = *effort;
+  }
 }
 
 void DJIMotorSetRawRef(DJIMotorInstance *motor, float raw_ref) {
   motor->motor_controller.pid_ref = raw_ref * DJIMotorGetRawRefSign(motor);
+  memset(&motor->motor_controller.ref_effort, 0,
+         sizeof(motor->motor_controller.ref_effort));
 }
 
 // 为所有电机实例计算三环PID,发送控制报文
@@ -390,11 +425,30 @@ void DJIMotorControl() {
       continue;
     }
 
+    if (motor_controller->ref_effort.semantic != CONTROLLER_OUTPUT_INVALID) {
+      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
+                                             &motor_controller->ref_effort,
+                                             &set,
+                                             &motor_controller->controller_output)) {
+        set = 0;
+        memset(&motor_controller->controller_output, 0,
+               sizeof(motor_controller->controller_output));
+      }
+
+      group = motor->sender_group;
+      num = motor->message_num;
+      sender_assignment[group].tx_buff[2 * num] = (uint8_t)(set >> 8);
+      sender_assignment[group].tx_buff[2 * num + 1] =
+          (uint8_t)(set & 0x00ff);
+      continue;
+    }
+
     // ==================== LQR控制器分支 ====================
     if (motor_setting->controller_type == CONTROLLER_LQR) {
-      // LQR控制器：直接计算输出电流，不经过PID
+      // LQR控制器：控制律本体输出转为输出轴扭矩，不经过串级PID
       float angle_feedback, velocity_feedback;
       float lqr_current_output; // LQR输出电流 [A]
+      float lqr_tau_ref;        // LQR输出轴扭矩 [N·m]
 
       // 获取角度反馈
       if (motor_setting->angle_feedback_source == OTHER_FEED)
@@ -427,9 +481,12 @@ void DJIMotorControl() {
       if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
         lqr_current_output += *motor_controller->current_feedforward_ptr;
 
+      lqr_tau_ref =
+          DJIMotorCurrentToTauRef(&motor->physical_param, lqr_current_output);
+
       Controller_Effort_Output_s effort_output = {
-          .semantic = CONTROLLER_OUTPUT_CURRENT_A,
-          .current_ref_a = lqr_current_output,
+          .semantic = CONTROLLER_OUTPUT_TAU_REF,
+          .tau_ref_nm = lqr_tau_ref,
       };
       if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
                                              &effort_output, &set,
@@ -438,7 +495,7 @@ void DJIMotorControl() {
         memset(&motor_controller->controller_output, 0,
                sizeof(motor_controller->controller_output));
       }
-      motor_controller->output = lqr_current_output;
+      motor_controller->output = lqr_tau_ref;
     }
     // ==================== SMC控制器分支 ====================
     else if (motor_setting->controller_type == CONTROLLER_SMC) {
@@ -497,9 +554,11 @@ void DJIMotorControl() {
       }
 
       smc_output = float_constrain(smc_output, -16384.0f, 16384.0f);
+      float smc_tau_ref =
+          DJIMotorRawCurrentToTauRef(&motor->physical_param, smc_output);
       Controller_Effort_Output_s effort_output = {
-          .semantic = CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
-          .raw_current_cmd = smc_output,
+          .semantic = CONTROLLER_OUTPUT_TAU_REF,
+          .tau_ref_nm = smc_tau_ref,
       };
       if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
                                              &effort_output, &set,
@@ -508,7 +567,7 @@ void DJIMotorControl() {
         memset(&motor_controller->controller_output, 0,
                sizeof(motor_controller->controller_output));
       }
-      motor_controller->output = smc_output;
+      motor_controller->output = smc_tau_ref;
     }
     // ==================== PID控制器分支（原有逻辑）====================
     else // CONTROLLER_PID
@@ -556,9 +615,11 @@ void DJIMotorControl() {
       if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
         pid_ref *= -1;
 
+      float pid_tau_ref =
+          DJIMotorRawCurrentToTauRef(&motor->physical_param, pid_ref);
       Controller_Effort_Output_s effort_output = {
-          .semantic = CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
-          .raw_current_cmd = pid_ref,
+          .semantic = CONTROLLER_OUTPUT_TAU_REF,
+          .tau_ref_nm = pid_tau_ref,
       };
       if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
                                              &effort_output, &set,
@@ -567,6 +628,7 @@ void DJIMotorControl() {
         memset(&motor_controller->controller_output, 0,
                sizeof(motor_controller->controller_output));
       }
+      motor_controller->output = pid_tau_ref;
     }
 
     // 分组填入发送数据

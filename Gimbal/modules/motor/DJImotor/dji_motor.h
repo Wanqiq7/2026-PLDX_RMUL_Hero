@@ -87,21 +87,34 @@ typedef struct {
 DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config);
 
 /**
- * @brief 被application层的应用调用,给电机设定参考值.
- *        对于应用,可以将电机视为传递函数为1的设备,不需要关心底层的闭环
+ * @brief 兼容接口：给电机设置传统参考值
+ *        该接口会写入电机内部的 reference carrier，由闭环逻辑继续解释
  *
  * @param motor 要设置的电机
  * @param ref 设定参考值
+ *
+ * @note  新的动力执行器主线优先使用 DJIMotorSetEffort()。
+ *        SetRef() 仅保留给角度/速度等旧闭环链路与兼容调用方使用。
  */
 void DJIMotorSetRef(DJIMotorInstance *motor, float ref);
 
 /**
- * @brief 设置电机原始输出参考值
+ * @brief 直接设置电机控制努力量，供扭矩主线或兼容桥使用
+ *
+ * @param motor 要设置的电机
+ * @param effort 统一控制努力量；传入 NULL 时清空直通努力量
+ */
+void DJIMotorSetEffort(DJIMotorInstance *motor,
+                       const Controller_Effort_Output_s *effort);
+
+/**
+ * @brief 显式 bypass 接口：直接设置电机原始电流参考值
  *
  * @param motor 要设置的电机
  * @param raw_ref 期望发送到CAN的原始电流值
  *
- * @note  该接口用于 OPEN_LOOP 原始输出场景，会自动补偿电机层内部的方向处理
+ * @note  该接口仅用于 OPEN_LOOP/raw current 接管场景，
+ *        会自动补偿电机层内部的方向处理，不属于扭矩主线默认路径。
  */
 void DJIMotorSetRawRef(DJIMotorInstance *motor, float raw_ref);
 

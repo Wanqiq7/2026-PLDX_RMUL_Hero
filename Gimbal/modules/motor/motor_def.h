@@ -194,6 +194,7 @@ typedef struct {
 
   float pid_ref; // 将会作为每个环的输入和输出顺次通过串级闭环
   float output;  // 控制器最终输出（供LQR等直接控制使用）
+  Controller_Effort_Output_s ref_effort; // 开环/兼容桥直接下发的控制努力量
   Controller_Effort_Output_s controller_output;
 } Motor_Controller_s;
 

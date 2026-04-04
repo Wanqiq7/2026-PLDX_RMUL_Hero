@@ -87,13 +87,25 @@ typedef struct {
 DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config);
 
 /**
- * @brief 被application层的应用调用,给电机设定参考值.
- *        对于应用,可以将电机视为传递函数为1的设备,不需要关心底层的闭环
+ * @brief 兼容接口：给电机设置传统参考值
+ *        该接口会写入电机内部的 reference carrier，由闭环逻辑继续解释
  *
  * @param motor 要设置的电机
  * @param ref 设定参考值
+ *
+ * @note  新的动力执行器主线优先使用 DJIMotorSetEffort()。
+ *        SetRef() 仅保留给角度/速度等旧闭环链路与兼容调用方使用。
  */
 void DJIMotorSetRef(DJIMotorInstance *motor, float ref);
+
+/**
+ * @brief 直接设置电机控制努力量，供扭矩主线或兼容桥使用
+ *
+ * @param motor 要设置的电机
+ * @param effort 统一控制努力量；传入 NULL 时清空直通努力量
+ */
+void DJIMotorSetEffort(DJIMotorInstance *motor,
+                       const Controller_Effort_Output_s *effort);
 
 /**
  * @brief 切换反馈的目标来源,如将角速度和角度的来源换为IMU(小陀螺模式常用)

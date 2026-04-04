@@ -238,6 +238,24 @@ void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop)
 void DJIMotorSetRef(DJIMotorInstance *motor, float ref)
 {
     motor->motor_controller.pid_ref = ref;
+    memset(&motor->motor_controller.ref_effort, 0,
+           sizeof(motor->motor_controller.ref_effort));
+}
+
+void DJIMotorSetEffort(DJIMotorInstance *motor,
+                       const Controller_Effort_Output_s *effort)
+{
+    if (motor == NULL)
+    {
+        return;
+    }
+
+    memset(&motor->motor_controller.ref_effort, 0,
+           sizeof(motor->motor_controller.ref_effort));
+    if (effort != NULL)
+    {
+        motor->motor_controller.ref_effort = *effort;
+    }
 }
 
 // 为所有电机实例计算三环PID,发送控制报文
@@ -251,6 +269,7 @@ void DJIMotorControl()
     Motor_Controller_s *motor_controller;   // 电机控制器
     DJI_Motor_Measure_s *measure;           // 电机测量值
     float pid_measure, pid_ref;             // 电机PID测量值和设定值
+    Controller_Effort_Output_s effort_output;
 
     // 遍历所有电机实例,进行串级PID的计算并设置发送报文的值
     for (size_t i = 0; i < idx; ++i)
@@ -260,8 +279,15 @@ void DJIMotorControl()
         motor_controller = &motor->motor_controller;
         measure = &motor->measure;
         pid_ref = motor_controller->pid_ref; // 保存设定值,防止motor_controller->pid_ref在计算过程中被修改
+        memset(&effort_output, 0, sizeof(effort_output));
         if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
             pid_ref *= -1; // 设置反转
+
+        if (motor_controller->ref_effort.semantic != CONTROLLER_OUTPUT_INVALID)
+        {
+            effort_output = motor_controller->ref_effort;
+            goto build_command;
+        }
 
         // pid_ref会顺次通过被启用的闭环充当数据的载体
         // 计算位置环,只有启用位置环且外层闭环为位置时会计算速度环输出
@@ -300,11 +326,12 @@ void DJIMotorControl()
         if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
             pid_ref *= -1;
 
-        Controller_Effort_Output_s effort_output = {
+        effort_output = (Controller_Effort_Output_s){
             .semantic = CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
             .raw_current_cmd = pid_ref,
         };
 
+    build_command:
         if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
                                                &effort_output, &set,
                                                &motor_controller->controller_output))
