@@ -220,24 +220,6 @@ static void DJIMotorLostCallback(void *motor_ptr) {
              motor->motor_can_instance->tx_id);
 }
 
-static float DJIMotorCurrentToTauRef(const Motor_Physical_Param_s *param,
-                                     float current_ref_a) {
-  if (param == NULL || param->torque_constant_nm_per_a <= 0.0f) {
-    return 0.0f;
-  }
-  return current_ref_a * param->torque_constant_nm_per_a;
-}
-
-static float DJIMotorRawCurrentToTauRef(const Motor_Physical_Param_s *param,
-                                        float raw_current_cmd) {
-  if (param == NULL || param->raw_to_current_coeff <= 0.0f ||
-      param->torque_constant_nm_per_a <= 0.0f) {
-    return 0.0f;
-  }
-  return raw_current_cmd * param->raw_to_current_coeff *
-         param->torque_constant_nm_per_a;
-}
-
 // 电机初始化,返回一个电机实例
 DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config) {
   uint8_t physical_param_valid = 0U;
@@ -410,7 +392,6 @@ uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
   if (motor_setting->controller_type == CONTROLLER_LQR) {
     float angle_feedback = 0.0f;
     float velocity_feedback = 0.0f;
-    float lqr_current_output = 0.0f;
     float lqr_tau_ref = 0.0f;
     float target_angle = pid_ref;
 
@@ -432,13 +413,16 @@ uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
     if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
       target_angle *= -1.0f;
 
-    lqr_current_output = LQRCalculate(&motor_controller->LQR, angle_feedback,
-                                      velocity_feedback, target_angle);
-    if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
-      lqr_current_output += *motor_controller->current_feedforward_ptr;
-
     lqr_tau_ref =
-        DJIMotorCurrentToTauRef(&motor->physical_param, lqr_current_output);
+        LQRCalculate(&motor_controller->LQR, angle_feedback, velocity_feedback,
+                     target_angle);
+    if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
+      lqr_tau_ref += *motor_controller->current_feedforward_ptr;
+    if (motor->physical_param.torque_limit_nm > 0.0f) {
+      lqr_tau_ref = float_constrain(lqr_tau_ref,
+                                    -motor->physical_param.torque_limit_nm,
+                                    motor->physical_param.torque_limit_nm);
+    }
     effort->semantic = CONTROLLER_OUTPUT_TAU_REF;
     effort->tau_ref_nm = lqr_tau_ref;
     motor_controller->output = lqr_tau_ref;
@@ -449,7 +433,6 @@ uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
     float angle_feedback = 0.0f;
     float velocity_feedback = 0.0f;
     float target_ref = pid_ref;
-    float smc_output = 0.0f;
     float smc_tau_ref = 0.0f;
     float dt = DWT_GetDeltaT(&motor_controller->smc_dwt_cnt);
 
@@ -483,22 +466,23 @@ uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
         motor_setting->outer_loop_type == ANGLE_LOOP) {
       SMC_ControllerUpdatePositionError(&motor_controller->smc, target_ref,
                                         angle_feedback, velocity_feedback);
-      smc_output = SMC_ControllerCalculate(&motor_controller->smc);
+      smc_tau_ref = SMC_ControllerCalculate(&motor_controller->smc);
     } else if ((motor_setting->close_loop_type & SPEED_LOOP) &&
                motor_setting->outer_loop_type == SPEED_LOOP) {
       if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
         target_ref += *motor_controller->speed_feedforward_ptr;
       SMC_ControllerUpdateVelocityError(&motor_controller->smc, target_ref,
                                         velocity_feedback);
-      smc_output = SMC_ControllerCalculate(&motor_controller->smc);
+      smc_tau_ref = SMC_ControllerCalculate(&motor_controller->smc);
     }
 
     if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
-      smc_output += *motor_controller->current_feedforward_ptr;
-
-    smc_output = float_constrain(smc_output, -16384.0f, 16384.0f);
-    smc_tau_ref =
-        DJIMotorRawCurrentToTauRef(&motor->physical_param, smc_output);
+      smc_tau_ref += *motor_controller->current_feedforward_ptr;
+    if (motor->physical_param.torque_limit_nm > 0.0f) {
+      smc_tau_ref = float_constrain(smc_tau_ref,
+                                    -motor->physical_param.torque_limit_nm,
+                                    motor->physical_param.torque_limit_nm);
+    }
     effort->semantic = CONTROLLER_OUTPUT_TAU_REF;
     effort->tau_ref_nm = smc_tau_ref;
     motor_controller->output = smc_tau_ref;
@@ -538,9 +522,12 @@ uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
   if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
     pid_ref *= -1.0f;
 
+  if (motor->physical_param.torque_limit_nm > 0.0f) {
+    pid_ref = float_constrain(pid_ref, -motor->physical_param.torque_limit_nm,
+                              motor->physical_param.torque_limit_nm);
+  }
   effort->semantic = CONTROLLER_OUTPUT_TAU_REF;
-  effort->tau_ref_nm =
-      DJIMotorRawCurrentToTauRef(&motor->physical_param, pid_ref);
+  effort->tau_ref_nm = pid_ref;
   motor_controller->output = effort->tau_ref_nm;
   return 1U;
 }
@@ -557,20 +544,13 @@ void DJIMotorControl() {
   uint8_t group, num; // 电机组号和组内编号
   int16_t set;        // 电机控制CAN发送设定值
   DJIMotorInstance *motor;
-  Motor_Control_Setting_s *motor_setting; // 电机控制参数
   Motor_Controller_s *motor_controller;   // 电机控制器
-  DJI_Motor_Measure_s *measure;           // 电机测量值
-  float pid_measure, pid_ref;             // 电机PID测量值和设定值
+  Controller_Effort_Output_s effort_output = {0};
 
   // 遍历所有电机实例,进行串级PID的计算并设置发送报文的值
   for (size_t i = 0; i < idx; ++i) { // 减小访存开销,先保存指针引用
     motor = dji_motor_instance[i];
-    motor_setting = &motor->motor_settings;
     motor_controller = &motor->motor_controller;
-    measure = &motor->measure;
-    pid_ref =
-        motor_controller
-            ->pid_ref; // 保存设定值,防止motor_controller->pid_ref在计算过程中被修改
 
     // 若电机处于停止状态：不计算控制器，直接清零输出，避免停机期间积分累积
     if (motor->stop_flag == MOTOR_STOP) {
@@ -580,210 +560,20 @@ void DJIMotorControl() {
       continue;
     }
 
+    memset(&effort_output, 0, sizeof(effort_output));
     if (motor_controller->ref_effort.semantic != CONTROLLER_OUTPUT_INVALID) {
-      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
-                                             &motor_controller->ref_effort,
-                                             &set,
-                                             &motor_controller->controller_output)) {
-        set = 0;
-        memset(&motor_controller->controller_output, 0,
-               sizeof(motor_controller->controller_output));
-      }
-
-      group = motor->sender_group;
-      num = motor->message_num;
-      sender_assignment[group].tx_buff[2 * num] = (uint8_t)(set >> 8);
-      sender_assignment[group].tx_buff[2 * num + 1] =
-          (uint8_t)(set & 0x00ff);
-      continue;
+      effort_output = motor_controller->ref_effort;
+    } else if (!DJIMotorCalculateEffort(motor, motor_controller->pid_ref,
+                                        &effort_output)) {
+      memset(&effort_output, 0, sizeof(effort_output));
     }
 
-    // ==================== LQR控制器分支 ====================
-    if (motor_setting->controller_type == CONTROLLER_LQR) {
-      // LQR控制器：控制律本体输出转为输出轴扭矩，不经过串级PID
-      float angle_feedback, velocity_feedback;
-      float lqr_current_output; // LQR输出电流 [A]
-      float lqr_tau_ref;        // LQR输出轴扭矩 [N·m]
-
-      // 获取角度反馈
-      if (motor_setting->angle_feedback_source == OTHER_FEED)
-        angle_feedback = *motor_controller->other_angle_feedback_ptr;
-      else
-        angle_feedback = measure->total_angle; // 使用电机编码器
-
-      // 获取速度反馈
-      if (motor_setting->speed_feedback_source == OTHER_FEED)
-        velocity_feedback = *motor_controller->other_speed_feedback_ptr;
-      else
-        velocity_feedback = measure->speed_aps;
-
-      // 处理反馈方向反转
-      if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE) {
-        angle_feedback *= -1;
-        velocity_feedback *= -1;
-      }
-
-      // 处理电机反转（目标值取反）
-      float target_angle = pid_ref;
-      if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
-        target_angle *= -1;
-
-      // LQR控制律计算
-      lqr_current_output = LQRCalculate(&motor_controller->LQR, angle_feedback,
-                                        velocity_feedback, target_angle);
-
-      // 电流前馈（可选）
-      if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
-        lqr_current_output += *motor_controller->current_feedforward_ptr;
-
-      lqr_tau_ref =
-          DJIMotorCurrentToTauRef(&motor->physical_param, lqr_current_output);
-
-      Controller_Effort_Output_s effort_output = {
-          .semantic = CONTROLLER_OUTPUT_TAU_REF,
-          .tau_ref_nm = lqr_tau_ref,
-      };
-      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
-                                             &effort_output, &set,
-                                             &motor_controller->controller_output)) {
-        set = 0;
-        memset(&motor_controller->controller_output, 0,
-               sizeof(motor_controller->controller_output));
-      }
-      motor_controller->output = lqr_tau_ref;
-    }
-    // ==================== SMC控制器分支 ====================
-    else if (motor_setting->controller_type == CONTROLLER_SMC) {
-      float angle_feedback = 0.0f;
-      float velocity_feedback = 0.0f;
-      float target_ref = pid_ref;
-      float smc_output = 0.0f;
-      float dt = DWT_GetDeltaT(&motor_controller->smc_dwt_cnt);
-
-      if (dt <= 0.0f || dt > 0.02f) {
-        dt = (motor_controller->smc.sample_period > 0.0f)
-                 ? motor_controller->smc.sample_period
-                 : ROBOT_CTRL_PERIOD_S;
-      }
-
-      if (motor_setting->angle_feedback_source == OTHER_FEED) {
-        angle_feedback = *motor_controller->other_angle_feedback_ptr;
-      } else {
-        angle_feedback = measure->total_angle;
-      }
-
-      if (motor_setting->speed_feedback_source == OTHER_FEED) {
-        velocity_feedback = *motor_controller->other_speed_feedback_ptr;
-      } else {
-        velocity_feedback = measure->speed_aps;
-      }
-
-      if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE) {
-        angle_feedback *= -1.0f;
-        velocity_feedback *= -1.0f;
-      }
-
-      if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE) {
-        target_ref *= -1.0f;
-      }
-
-      SMC_ControllerSetSamplePeriod(&motor_controller->smc, dt);
-
-      if ((motor_setting->close_loop_type & ANGLE_LOOP) &&
-          motor_setting->outer_loop_type == ANGLE_LOOP) {
-        SMC_ControllerUpdatePositionError(&motor_controller->smc, target_ref,
-                                          angle_feedback, velocity_feedback);
-        smc_output = SMC_ControllerCalculate(&motor_controller->smc);
-      } else if ((motor_setting->close_loop_type & SPEED_LOOP) &&
-                 motor_setting->outer_loop_type == SPEED_LOOP) {
-        if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD) {
-          target_ref += *motor_controller->speed_feedforward_ptr;
-        }
-        SMC_ControllerUpdateVelocityError(&motor_controller->smc, target_ref,
-                                          velocity_feedback);
-        smc_output = SMC_ControllerCalculate(&motor_controller->smc);
-      }
-
-      if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD) {
-        smc_output += *motor_controller->current_feedforward_ptr;
-      }
-
-      smc_output = float_constrain(smc_output, -16384.0f, 16384.0f);
-      float smc_tau_ref =
-          DJIMotorRawCurrentToTauRef(&motor->physical_param, smc_output);
-      Controller_Effort_Output_s effort_output = {
-          .semantic = CONTROLLER_OUTPUT_TAU_REF,
-          .tau_ref_nm = smc_tau_ref,
-      };
-      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
-                                             &effort_output, &set,
-                                             &motor_controller->controller_output)) {
-        set = 0;
-        memset(&motor_controller->controller_output, 0,
-               sizeof(motor_controller->controller_output));
-      }
-      motor_controller->output = smc_tau_ref;
-    }
-    // ==================== PID控制器分支（原有逻辑）====================
-    else // CONTROLLER_PID
-    {
-      if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
-        pid_ref *= -1; // 设置反转
-
-      // pid_ref会顺次通过被启用的闭环充当数据的载体
-      // 计算位置环,只有启用位置环且外层闭环为位置时会计算速度环输出
-      if ((motor_setting->close_loop_type & ANGLE_LOOP) &&
-          motor_setting->outer_loop_type == ANGLE_LOOP) {
-        if (motor_setting->angle_feedback_source == OTHER_FEED)
-          pid_measure = *motor_controller->other_angle_feedback_ptr;
-        else
-          pid_measure = measure->total_angle; // MOTOR_FEED,对total
-                                              // angle闭环,防止在边界处出现突跃
-        // 更新pid_ref进入下一个环
-        pid_ref =
-            PIDCalculate(&motor_controller->angle_PID, pid_measure, pid_ref);
-      }
-
-      // 计算速度环,(外层闭环为速度或位置)且(启用速度环)时会计算速度环
-      if ((motor_setting->close_loop_type & SPEED_LOOP) &&
-          (motor_setting->outer_loop_type & (ANGLE_LOOP | SPEED_LOOP))) {
-        if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
-          pid_ref += *motor_controller->speed_feedforward_ptr;
-
-        if (motor_setting->speed_feedback_source == OTHER_FEED)
-          pid_measure = *motor_controller->other_speed_feedback_ptr;
-        else // MOTOR_FEED
-          pid_measure = measure->speed_aps;
-        // 更新pid_ref进入下一个环
-        pid_ref =
-            PIDCalculate(&motor_controller->speed_PID, pid_measure, pid_ref);
-      }
-
-      // 计算电流环,目前只要启用了电流环就计算,不管外层闭环是什么,并且电流只有电机自身传感器的反馈
-      if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
-        pid_ref += *motor_controller->current_feedforward_ptr;
-      if (motor_setting->close_loop_type & CURRENT_LOOP) {
-        pid_ref = PIDCalculate(&motor_controller->current_PID,
-                               measure->real_current, pid_ref);
-      }
-
-      if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
-        pid_ref *= -1;
-
-      float pid_tau_ref =
-          DJIMotorRawCurrentToTauRef(&motor->physical_param, pid_ref);
-      Controller_Effort_Output_s effort_output = {
-          .semantic = CONTROLLER_OUTPUT_TAU_REF,
-          .tau_ref_nm = pid_tau_ref,
-      };
-      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
-                                             &effort_output, &set,
-                                             &motor_controller->controller_output)) {
-        set = 0;
-        memset(&motor_controller->controller_output, 0,
-               sizeof(motor_controller->controller_output));
-      }
-      motor_controller->output = pid_tau_ref;
+    if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param, &effort_output,
+                                           &set,
+                                           &motor_controller->controller_output)) {
+      set = 0;
+      memset(&motor_controller->controller_output, 0,
+             sizeof(motor_controller->controller_output));
     }
 
     // 分组填入发送数据

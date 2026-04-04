@@ -5,6 +5,7 @@
  */
 
 #include "vision_control.h"
+#include "robot_def.h"
 #include "user_lib.h"
 #include <math.h>
 
@@ -78,7 +79,11 @@ void VisionCtrlStep(VisionCtrlState_s *state, const VisionCtrlParams_s *params,
 
   // 获取时间间隔
   state->dt = DWT_GetDeltaT(&state->DWT_CNT);
-  const float dt = state->dt;
+  float dt = state->dt;
+  if (dt <= 0.0f || dt > 0.02f) {
+    dt = ROBOT_CTRL_PERIOD_S;
+    state->dt = dt;
+  }
 
   // ---------- Yaw双环 ----------
   if (!state->yaw.inited) {

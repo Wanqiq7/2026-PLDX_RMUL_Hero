@@ -140,10 +140,10 @@ void PIDReset(PIDInstance *pid);
 typedef struct {
   //---------------------------------- init config block
   // config parameter
-  float K_angle;    // 角度反馈增益 [A/rad]
-  float K_velocity; // 角速度反馈增益 [A·s/rad]
-  float K_integral; // 积分增益 (可选) [A/(rad·s)]
-  float max_out;    // 最大输出限幅 [A]
+  float K_angle;    // 角度反馈增益 [N·m/rad]
+  float K_velocity; // 角速度反馈增益 [N·m·s/rad]
+  float K_integral; // 积分增益 (可选) [N·m/(rad·s)]
+  float max_out;    // 最大输出限幅 [N·m]
 
   // improve parameter
   uint8_t enable_integral;   // 是否启用积分项
@@ -162,7 +162,7 @@ typedef struct {
   float angle_error; // 角度误差 [rad]
   float integral;    // 积分项累积值
 
-  float output; // 控制器输出 [A]
+  float output; // 控制器输出 [N·m]
 
   uint32_t DWT_CNT; // 用于计算时间间隔
   float dt;         // 计算周期 [s]
@@ -171,10 +171,10 @@ typedef struct {
 /* 用于LQR初始化的结构体 */
 typedef struct {
   // basic parameter
-  float K_angle;    // 角度反馈增益 [A/rad]
-  float K_velocity; // 角速度反馈增益 [A·s/rad]
-  float K_integral; // 积分增益 [A/(rad·s)]
-  float max_out;    // 最大输出限幅 [A]
+  float K_angle;    // 角度反馈增益 [N·m/rad]
+  float K_velocity; // 角速度反馈增益 [N·m·s/rad]
+  float K_integral; // 积分增益 [N·m/(rad·s)]
+  float max_out;    // 最大输出限幅 [N·m]
 
   // improve parameter
   uint8_t enable_integral;   // 是否启用积分项 (0:禁用, 1:启用)
@@ -201,10 +201,10 @@ void LQRInit(LQRInstance *lqr, LQR_Init_Config_s *config);
  * @param measure_angle 当前角度反馈值 [rad]
  * @param measure_vel   当前角速度反馈值 [rad/s]
  * @param ref          目标角度值 [rad]
- * @return float       LQR控制器输出 (电流 [A])
+ * @return float       LQR控制器输出 (输出轴扭矩 [N·m])
  *
  * @note  控制律: u = -K1*(θ_ref - θ) - K2*ω + Ki*∫e·dt
- *        所有物理量使用标准单位制 (弧度、弧度/秒、安培)
+ *        所有物理量使用标准单位制 (弧度、弧度/秒、输出轴扭矩)
  */
 float LQRCalculate(LQRInstance *lqr, float measure_angle, float measure_vel,
                    float ref);

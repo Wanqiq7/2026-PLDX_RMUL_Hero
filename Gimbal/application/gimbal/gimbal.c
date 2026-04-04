@@ -99,8 +99,8 @@ void GimbalInit() {
       .controller_param_init_config =
           {
               // 串级
-              // PID：角度环输出角速度参考（rad/s），速度环输出电机电流指令（CAN
-              // 原始量） 注意：Yaw 反馈来自 IMU（弧度/弧度每秒），这里按
+              // PID：角度环输出角速度参考（rad/s），速度环输出输出轴扭矩参考
+              // （N·m）。注意：Yaw 反馈来自 IMU（弧度/弧度每秒），这里按
               // rad/rad/s 进行调参。
               .angle_PID =
                   {
@@ -116,13 +116,13 @@ void GimbalInit() {
                   },
               .speed_PID =
                   {
-                      .kp = 22500.0f,
-                      .ki = 2000.0f,
+                      .kp = 20.35f, // 由旧电流域参数换算到输出轴扭矩域
+                      .ki = 1.81f,
                       .kd = 0.0f,
-                      .MaxOut = 16384.0f, // GM6020 电流指令（CAN 原始量）限幅
+                      .MaxOut = 14.82f, // GM6020 输出轴扭矩参考限幅 [N·m]
                       .DeadBand = 0.0f,
                       .Improve = PID_Integral_Limit,
-                      .IntegralLimit = 2000.0f,
+                      .IntegralLimit = 1.81f,
                   },
               .smc =
                   {
