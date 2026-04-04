@@ -1,7 +1,7 @@
 /**
  * @file vision_control.h
- * @brief 视觉控制算法模块接口
- * @note Algorithm层：提供Yaw双环控制与Pitch限速参考生成
+ * @brief 视觉参考整形算法模块接口
+ * @note Algorithm层：只生成参考值与前馈，不直接输出执行量
  */
 
 #ifndef VISION_CONTROL_H
@@ -66,8 +66,10 @@ typedef struct {
 } VisionCtrlInput_s;
 
 typedef struct {
-  float yaw_current_cmd;
-  float pitch_ref_limited;
+  float yaw_ref_rad;
+  float pitch_ref_rad;
+  float yaw_rate_ff_rad_s;
+  float pitch_rate_ff_rad_s;
 } VisionCtrlOutput_s;
 
 /* ==================== 接口函数 ==================== */

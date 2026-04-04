@@ -364,10 +364,10 @@ typedef struct {
 
 
   uint8_t vision_takeover; // 视觉接管标志
-  float yaw_current_cmd;   // Yaw电流指令
-                           // [raw]（视觉双环输出）
-  float
-      pitch_ref_limited;
+  float yaw_ref_rad;         // 视觉建议的Yaw参考 [rad]
+  float pitch_ref_rad;       // 视觉建议的Pitch参考 [rad]
+  float yaw_rate_ff_rad_s;   // 视觉建议的Yaw速度前馈 [rad/s]
+  float pitch_rate_ff_rad_s; // 视觉建议的Pitch速度前馈 [rad/s]
 
 
   float yaw;   // 原始目标yaw角度 [rad]

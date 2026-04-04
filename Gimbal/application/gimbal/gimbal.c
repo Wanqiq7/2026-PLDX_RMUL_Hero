@@ -27,9 +27,9 @@
  * ============================================================
  * 思路：
  * - 云台应用层负责模式编排与视觉接管。
- * - Yaw：手动/回退链路使用 DJI 电机层 PID 控制器。
- * - Yaw：视觉直接给电流时，仍沿用 OPEN_LOOP 原始电流发送链路。
- * - Pitch：继续使用达妙 MIT 目标组装逻辑。
+ * - Yaw：手动/自瞄统一走闭环 CalculateEffort -> SetEffort 主线。
+ * - Vision：只提供参考值与前馈，不再直接下发电流。
+ * - Pitch：手动/自瞄统一走 torque-only MIT 主线。
  * ============================================================ */
 
 #if ENABLE_GIMBAL_SYSID
@@ -84,6 +84,8 @@ static Subscriber_t *vision_sub;
 static Gimbal_Upload_Data_s gimbal_feedback_data;
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;
 static Vision_Upload_Data_s vision_data_recv;
+static float yaw_vision_rate_ff_rad_s = 0.0f;
+static float pitch_vision_rate_ff_rad_s = 0.0f;
 
 void GimbalInit() {
   gimba_IMU_data = INS_Init();
@@ -126,6 +128,7 @@ void GimbalInit() {
                   {
                       .sample_period = ROBOT_CTRL_PERIOD_S,
                   },
+              .speed_feedforward_ptr = &yaw_vision_rate_ff_rad_s,
               .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
           },
@@ -184,6 +187,7 @@ void GimbalInit() {
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 1.5f,
                   },
+              .speed_feedforward_ptr = &pitch_vision_rate_ff_rad_s,
               .other_angle_feedback_ptr = &gimba_IMU_data->Pitch_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[0],
           },
@@ -226,6 +230,7 @@ void GimbalInit() {
   };
   yaw_motor = DJIMotorInit(&yaw_config);
   pitch_motor = DMMotorInit(&pitch_config);
+  pitch_motor->external_speed_feedforward_ptr = &pitch_vision_rate_ff_rad_s;
   DMMotorSetMode(pitch_motor, DM_MODE_MIT);
   DMMotorEnable(pitch_motor);
   DMMotorControlInit();
@@ -252,6 +257,8 @@ void GimbalTask() {
 
   float yaw_ref_rad = gimbal_cmd_recv.yaw;
   float pitch_ref_rad = gimbal_cmd_recv.pitch;
+  yaw_vision_rate_ff_rad_s = 0.0f;
+  pitch_vision_rate_ff_rad_s = 0.0f;
 
   const uint8_t autoaim_mode =
       (gimbal_cmd_recv.gimbal_mode == GIMBAL_AUTOAIM_MODE);
@@ -280,26 +287,27 @@ void GimbalTask() {
     break;
   }
   case GIMBAL_AUTOAIM_MODE: {
-    // 自瞄模式：有目标则视觉接管，否则保持遥控器/鼠标控制
+    // 自瞄模式：视觉仅提供参考与前馈，不再直接旁路驱动电机
     DJIMotorEnable(yaw_motor);
 
     if (vision_takeover) {
-      yaw_motor->motor_settings.close_loop_type = OPEN_LOOP;
-      yaw_motor->motor_settings.outer_loop_type = OPEN_LOOP;
-      DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
-      DJIMotorSetRawRef(yaw_motor, vision_data_recv.yaw_current_cmd);
-    } else {
+      yaw_ref_rad = vision_data_recv.yaw_ref_rad;
+      yaw_vision_rate_ff_rad_s = vision_data_recv.yaw_rate_ff_rad_s;
+      pitch_ref_rad = vision_data_recv.pitch_ref_rad;
+      pitch_vision_rate_ff_rad_s = vision_data_recv.pitch_rate_ff_rad_s;
       yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
       yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
       DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
-      if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
-        DJIMotorSetEffort(yaw_motor, &yaw_effort);
-      }
+    }
+    if (!vision_takeover) {
+      yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
+      yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
+      DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
+    }
+    if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
+      DJIMotorSetEffort(yaw_motor, &yaw_effort);
     }
 
-    if (vision_takeover) {
-      pitch_ref_rad = vision_data_recv.pitch_ref_limited;
-    }
     DMMotorEnable(pitch_motor);
     if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
                                      &pitch_effort)) {

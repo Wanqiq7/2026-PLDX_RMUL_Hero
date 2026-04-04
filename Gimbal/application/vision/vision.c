@@ -1,13 +1,13 @@
 /**
  * @file vision.c
  * @brief 视觉控制应用模块实现
- * @note 遵循项目三层架构,处理视觉数据并通过消息中心发布控制建议
+ * @note 遵循项目三层架构,处理视觉数据并通过消息中心发布控制参考
  *
  * 架构说明：
- * - 本模块负责视觉应用编排、消息交互和控制结果发布
- * - 视觉控制核（Yaw双环、Pitch限速）位于 modules/algorithm/vision_control.*
- * - Yaw：位置环(角度误差→角速度参考) + 速度环(角速度误差→电流指令)
- * - Pitch：限速/限幅参考生成，避免目标突跳
+ * - 本模块负责视觉应用编排、消息交互和参考结果发布
+ * - 视觉参考整形核位于 modules/algorithm/vision_control.*
+ * - Yaw：输出参考角 + 速度前馈
+ * - Pitch：输出限速/限幅后的参考角 + 速度前馈
  */
 
 #include "vision.h"
@@ -267,9 +267,11 @@ static void ProcessAutoAim(void) {
   VisionCtrlStep(&vision_ctrl_state, (const VisionCtrlParams_s *)&vision_params,
                  &ctrl_input, &ctrl_output);
 
-  vision_upload_data.yaw_current_cmd = ctrl_output.yaw_current_cmd;
-  // Pitch限速：输出限速后的目标角度（注意符号，与gimbal.c保持一致）
-  vision_upload_data.pitch_ref_limited = -ctrl_output.pitch_ref_limited;
+  vision_upload_data.yaw_ref_rad = ctrl_output.yaw_ref_rad;
+  vision_upload_data.yaw_rate_ff_rad_s = ctrl_output.yaw_rate_ff_rad_s;
+  // Pitch参考仍保持与云台主线一致的符号约定
+  vision_upload_data.pitch_ref_rad = -ctrl_output.pitch_ref_rad;
+  vision_upload_data.pitch_rate_ff_rad_s = -ctrl_output.pitch_rate_ff_rad_s;
 
   // 根据目标状态设置锁定和射击标志
   switch (vision_recv_data->target_state) {
@@ -321,8 +323,10 @@ static void ClearVisionOutput(void) {
   vision_upload_data.target_locked = 0;
   vision_upload_data.should_fire = 0;
   vision_upload_data.vision_takeover = 0;
-  vision_upload_data.yaw_current_cmd = 0.0f;
-  vision_upload_data.pitch_ref_limited = 0.0f;
+  vision_upload_data.yaw_ref_rad = 0.0f;
+  vision_upload_data.pitch_ref_rad = 0.0f;
+  vision_upload_data.yaw_rate_ff_rad_s = 0.0f;
+  vision_upload_data.pitch_rate_ff_rad_s = 0.0f;
   vision_upload_data.yaw = 0.0f;
   vision_upload_data.pitch = 0.0f;
 }
