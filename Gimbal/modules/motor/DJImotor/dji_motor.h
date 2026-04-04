@@ -108,6 +108,17 @@ void DJIMotorSetEffort(DJIMotorInstance *motor,
                        const Controller_Effort_Output_s *effort);
 
 /**
+ * @brief 按当前控制器类型与反馈配置计算统一控制努力量
+ *
+ * @param motor 电机实例
+ * @param ref 参考输入（角度/速度等，由当前外环解释）
+ * @param effort 输出的统一控制努力量
+ * @return uint8_t 1-成功，0-失败
+ */
+uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
+                                Controller_Effort_Output_s *effort);
+
+/**
  * @brief 显式 bypass 接口：直接设置电机原始电流参考值
  *
  * @param motor 要设置的电机

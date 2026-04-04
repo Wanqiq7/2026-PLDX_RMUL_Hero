@@ -91,6 +91,7 @@ typedef struct {
   float mit_target_torque_nm;
   float mit_target_stiffness_kp;
   float mit_target_damping_kd;
+  Controller_Effort_Output_s ref_effort;
 
   /* MIT 速度直控：位置锁零，仅保留速度/力矩前馈/阻尼 */
   float mit_velocity_only_rad_s;
@@ -122,6 +123,11 @@ typedef enum {
 DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config);
 
 void DMMotorSetRef(DMMotorInstance *motor, float angle_rad, float torque_ff);
+uint8_t DMMotorCalculateTorqueEffort(DMMotorInstance *motor, float angle_rad,
+                                     float torque_ff,
+                                     Controller_Effort_Output_s *effort);
+void DMMotorSetEffort(DMMotorInstance *motor,
+                      const Controller_Effort_Output_s *effort);
 void DMMotorSetMITTargets(DMMotorInstance *motor, float angle, float omega,
                           float torque, float kp, float kd);
 void DMMotorSetPVT(DMMotorInstance *motor, float pos_rad, float v_limit_rad_s,

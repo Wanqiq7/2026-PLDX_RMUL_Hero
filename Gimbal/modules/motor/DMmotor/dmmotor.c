@@ -150,6 +150,13 @@ static uint8_t DMMotorNeedEnableRetry(const DMMotorInstance *motor) {
   return (motor->measure.motor_state == DM_FB_STATE_DISABLED) ? 1U : 0U;
 }
 
+static void DMMotorClearDirectEffort(DMMotorInstance *motor) {
+  if (!motor) {
+    return;
+  }
+  memset(&motor->ref_effort, 0, sizeof(motor->ref_effort));
+}
+
 static void DMMotorSendCommand(DMMotor_Mode_e cmd, DMMotorInstance *motor) {
   if (!motor || !motor->motor_can_instance) {
     return;
@@ -294,6 +301,7 @@ void DMMotorSetRef(DMMotorInstance *motor, float angle_rad, float torque_ff) {
     return;
   }
 
+  DMMotorClearDirectEffort(motor);
   motor->use_pvt_command_frame = 0;
   motor->use_mit_velocity_only = 0;
   motor->use_cascade_pid_path = 1;
@@ -302,12 +310,79 @@ void DMMotorSetRef(DMMotorInstance *motor, float angle_rad, float torque_ff) {
   motor->cascade_torque_ff_nm = torque_ff;
 }
 
+uint8_t DMMotorCalculateTorqueEffort(DMMotorInstance *motor, float angle_rad,
+                                     float torque_ff,
+                                     Controller_Effort_Output_s *effort) {
+  Motor_Control_Setting_s *setting = NULL;
+  float angle_feedback_rad = 0.0f;
+  float speed_feedback_rad_s = 0.0f;
+  float speed_ref_rad_s = 0.0f;
+  float torque_ref_nm = 0.0f;
+
+  if (!motor || !effort) {
+    return 0U;
+  }
+
+  setting = &motor->motor_settings;
+  angle_feedback_rad =
+      (motor->external_angle_feedback_ptr) ? *motor->external_angle_feedback_ptr
+                                           : 0.0f;
+  speed_feedback_rad_s =
+      (motor->external_speed_feedback_ptr) ? *motor->external_speed_feedback_ptr
+                                           : 0.0f;
+
+  angle_feedback_rad =
+      DMMotorApplyFeedbackDirection(setting, angle_feedback_rad);
+  speed_feedback_rad_s =
+      DMMotorApplyFeedbackDirection(setting, speed_feedback_rad_s);
+
+  speed_ref_rad_s =
+      PIDCalculate(&motor->angle_PID, angle_feedback_rad, angle_rad);
+  speed_ref_rad_s = float_constrain(speed_ref_rad_s, motor->mit_limit.omega_min,
+                                    motor->mit_limit.omega_max);
+  if (motor->external_speed_feedforward_ptr) {
+    speed_ref_rad_s += *motor->external_speed_feedforward_ptr;
+  }
+
+  torque_ref_nm =
+      PIDCalculate(&motor->speed_PID, speed_feedback_rad_s, speed_ref_rad_s);
+  torque_ref_nm += torque_ff;
+  if (motor->external_torque_feedforward_ptr) {
+    torque_ref_nm += *motor->external_torque_feedforward_ptr;
+  }
+  torque_ref_nm =
+      float_constrain(torque_ref_nm, motor->mit_limit.torque_min,
+                      motor->mit_limit.torque_max);
+
+  memset(effort, 0, sizeof(*effort));
+  effort->semantic = CONTROLLER_OUTPUT_TAU_REF;
+  effort->tau_ref_nm = torque_ref_nm;
+  return 1U;
+}
+
+void DMMotorSetEffort(DMMotorInstance *motor,
+                      const Controller_Effort_Output_s *effort) {
+  if (!motor) {
+    return;
+  }
+
+  DMMotorClearDirectEffort(motor);
+  if (effort != NULL) {
+    motor->ref_effort = *effort;
+  }
+  motor->use_pvt_command_frame = 0;
+  motor->use_mit_velocity_only = 0;
+  motor->use_cascade_pid_path = 0;
+  motor->use_mit_full_command = 0;
+}
+
 void DMMotorSetMITTargets(DMMotorInstance *motor, float angle, float omega,
                           float torque, float kp, float kd) {
   if (!motor) {
     return;
   }
 
+  DMMotorClearDirectEffort(motor);
   motor->use_pvt_command_frame = 0;
   motor->use_mit_velocity_only = 0;
   motor->use_cascade_pid_path = 0;
@@ -349,6 +424,7 @@ void DMMotorSetMITVelocity(DMMotorInstance *motor, float omega, float torque_ff,
     return;
   }
 
+  DMMotorClearDirectEffort(motor);
   motor->use_pvt_command_frame = 0;
   motor->use_mit_velocity_only = 1;
   motor->use_cascade_pid_path = 0;
@@ -364,6 +440,7 @@ void DMMotorSetPVT(DMMotorInstance *motor, float pos_rad,
     return;
   }
 
+  DMMotorClearDirectEffort(motor);
   motor->use_pvt_command_frame = 1;
   motor->use_cascade_pid_path = 0;
   motor->use_mit_full_command = 0;
@@ -481,7 +558,13 @@ void DMMotorTask(void const *argument) {
       goto pack_and_send;
     }
 
-    if (motor->use_mit_velocity_only) {
+    if (motor->ref_effort.semantic != CONTROLLER_OUTPUT_INVALID) {
+      target_angle = 0.0f;
+      target_velocity = 0.0f;
+      target_torque = motor->ref_effort.tau_ref_nm;
+      target_kp = 0.0f;
+      target_kd = 0.0f;
+    } else if (motor->use_mit_velocity_only) {
       target_angle = 0.0f;
       target_kp = 0.0f;
       target_velocity = motor->mit_velocity_only_rad_s;

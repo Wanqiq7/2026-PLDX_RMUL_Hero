@@ -68,9 +68,26 @@
 - [x] 回归脚本通过
 - [x] 编译 `Gimbal` Debug 固件通过
 
+### Task 5: Gimbal 常规动力链路显式切到 SetEffort 主线
+
+**Files:**
+- Modify: `Gimbal/application/gimbal/gimbal.c`
+- Modify: `Gimbal/modules/motor/DJImotor/dji_motor.h`
+- Modify: `Gimbal/modules/motor/DJImotor/dji_motor.c`
+- Modify: `Gimbal/modules/motor/DMmotor/dmmotor.h`
+- Modify: `Gimbal/modules/motor/DMmotor/dmmotor.c`
+- Test: `tests/gimbal_seteffort_mainline_regression.ps1`
+
+- [x] 新增 `DJIMotorCalculateEffort(...)`
+- [x] 新增 `DMMotorCalculateTorqueEffort(...)`
+- [x] 新增 `DMMotorSetEffort(...)`
+- [x] `GimbalTask()` 常规路径改为 `Calculate -> SetEffort`
+- [x] 回归脚本通过
+- [x] 编译 `Gimbal` Debug 固件通过
+
 ## Chunk 2: 下一批待实施
 
-### Task 5: 清理 Gimbal 上层接线
+### Task 6: 清理 Gimbal 上层接线
 
 **Files:**
 - Modify: `Gimbal/application/gimbal/gimbal.c`
@@ -82,7 +99,7 @@
 - [ ] 把 bypass 接口显式命名并加注释
 - [ ] 重新验证 `AUTOAIM` 与模式切换
 
-### Task 6: 文档同步
+### Task 7: 文档同步
 
 **Files:**
 - Modify: `Gimbal/modules/motor/tau_ref_adapter.md`
@@ -94,7 +111,7 @@
 - [ ] 增加 `LegacyPowerBridge` 说明
 - [ ] 增加 `SetEffort` / `SetRef` 语义边界说明
 
-### Task 7: 第二阶段统一入口清理
+### Task 8: 第二阶段统一入口清理
 
 **Files:**
 - Modify: `Chassis/modules/motor/DJImotor/dji_motor.h`

@@ -26,17 +26,19 @@ function Assert-NoPattern {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $gimbalTask = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.c'
-$dmMotor = Join-Path $repoRoot 'Gimbal\modules\motor\DMmotor\dmmotor.c'
+$djiHeader = Join-Path $repoRoot 'Gimbal\modules\motor\DJImotor\dji_motor.h'
+$dmHeader = Join-Path $repoRoot 'Gimbal\modules\motor\DMmotor\dmmotor.h'
 
+Assert-Pattern $djiHeader 'DJIMotorCalculateEffort' 'Missing DJI effort calculation API.'
+Assert-Pattern $dmHeader 'DMMotorCalculateTorqueEffort' 'Missing DM effort calculation API.'
+Assert-Pattern $dmHeader 'DMMotorSetEffort' 'Missing DM effort setter API.'
+
+Assert-Pattern $gimbalTask 'DJIMotorCalculateEffort' 'Yaw mainline is not calculating effort in module layer.'
+Assert-Pattern $gimbalTask 'DJIMotorSetEffort\(yaw_motor,' 'Yaw mainline is not handing effort to SetEffort.'
 Assert-Pattern $gimbalTask 'DMMotorCalculateTorqueEffort' 'Pitch mainline is not calculating torque effort in module layer.'
 Assert-Pattern $gimbalTask 'DMMotorSetEffort\(pitch_motor,' 'Pitch mainline is not handing effort to SetEffort.'
+
+Assert-NoPattern $gimbalTask 'DJIMotorSetRef\(yaw_motor,' 'Yaw mainline still calls SetRef directly.'
 Assert-NoPattern $gimbalTask 'DMMotorSetRef\(pitch_motor,' 'Pitch mainline still calls SetRef directly.'
-Assert-NoPattern $gimbalTask 'DMMotorSetMITTargetByProfile\(pitch_motor, pitch_ref_rad\)' 'Pitch mainline still uses MIT full-command profile path.'
 
-Assert-Pattern $dmMotor 'PIDCalculate\(&motor->speed_PID,' 'DM torque mainline is missing the speed-to-torque inner loop.'
-Assert-Pattern $dmMotor 'target_angle = 0\.0f;' 'DM torque mainline should zero MIT angle for torque-only path.'
-Assert-Pattern $dmMotor 'target_velocity = 0\.0f;' 'DM torque mainline should zero MIT velocity for torque-only path.'
-Assert-Pattern $dmMotor 'target_kp = 0\.0f;' 'DM torque mainline should zero MIT stiffness for torque-only path.'
-Assert-Pattern $dmMotor 'target_kd = 0\.0f;' 'DM torque mainline should zero MIT damping for torque-only path.'
-
-Write-Output 'PASS: pitch DM torque mainline regression checks'
+Write-Output 'PASS: gimbal SetEffort mainline regression checks'

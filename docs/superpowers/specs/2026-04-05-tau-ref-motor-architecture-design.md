@@ -67,15 +67,19 @@
    - `SMC` 最终输出改为 `TAU_REF`
 
 5. `Pitch DM MIT` 主线收敛为 torque-only
-   - `GimbalTask()` 常规路径改为 `DMMotorSetRef(pitch_ref_rad, torque_ff)`
    - `DMmotor` 模块内执行 `angle PID -> speed PID -> tau_ref`
+   - 新增 `DMMotorCalculateTorqueEffort(...)` / `DMMotorSetEffort(...)`
    - MIT 常规下发时默认屏蔽 angle/velocity/kp/kd，只保留 torque 通道
+
+6. `Gimbal` 常规动力链路显式走 `SetEffort`
+   - `Yaw`：`DJIMotorCalculateEffort(...) -> DJIMotorSetEffort(...)`
+   - `Pitch`：`DMMotorCalculateTorqueEffort(...) -> DMMotorSetEffort(...)`
+   - `SetRef()` 继续保留，但仅作为兼容接口
 
 ### 暂未完成
 
-1. `Gimbal` 上层模式链路还未完全显式使用 `SetEffort`
-2. 旧 `SetRef` 语义仍存在，暂作为兼容接口保留
-3. 文档和说明文件尚未同步到新主线表述
+1. 旧 `SetRef` 语义仍存在，暂作为兼容接口保留
+2. 文档和说明文件尚未完全同步到新主线表述
 
 ## Chassis 冲突处理结论
 

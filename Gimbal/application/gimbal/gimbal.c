@@ -244,6 +244,8 @@ void GimbalTask() {
 #if ENABLE_GIMBAL_SYSID
   GimbalSystemIDSwitch();
 #endif
+  Controller_Effort_Output_s yaw_effort = {0};
+  Controller_Effort_Output_s pitch_effort = {0};
 
   SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
   SubGetMessage(vision_sub, &vision_data_recv);
@@ -266,10 +268,15 @@ void GimbalTask() {
     DJIMotorEnable(yaw_motor);
     yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
     yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
-    DJIMotorSetRef(yaw_motor, yaw_ref_rad);
     DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
+    if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
+      DJIMotorSetEffort(yaw_motor, &yaw_effort);
+    }
     DMMotorEnable(pitch_motor);
-    DMMotorSetRef(pitch_motor, pitch_ref_rad, 0.0f);
+    if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
+                                     &pitch_effort)) {
+      DMMotorSetEffort(pitch_motor, &pitch_effort);
+    }
     break;
   }
   case GIMBAL_AUTOAIM_MODE: {
@@ -284,15 +291,20 @@ void GimbalTask() {
     } else {
       yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
       yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
-      DJIMotorSetRef(yaw_motor, yaw_ref_rad);
       DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
+      if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
+        DJIMotorSetEffort(yaw_motor, &yaw_effort);
+      }
     }
 
     if (vision_takeover) {
       pitch_ref_rad = vision_data_recv.pitch_ref_limited;
     }
     DMMotorEnable(pitch_motor);
-    DMMotorSetRef(pitch_motor, pitch_ref_rad, 0.0f);
+    if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
+                                     &pitch_effort)) {
+      DMMotorSetEffort(pitch_motor, &pitch_effort);
+    }
     break;
   }
   case GIMBAL_LQR_MODE: {
@@ -300,9 +312,14 @@ void GimbalTask() {
     yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
     yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
     DJIMotorChangeController(yaw_motor, CONTROLLER_LQR);
-    DJIMotorSetRef(yaw_motor, yaw_ref_rad);
+    if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
+      DJIMotorSetEffort(yaw_motor, &yaw_effort);
+    }
     DMMotorEnable(pitch_motor);
-    DMMotorSetRef(pitch_motor, pitch_ref_rad, 0.0f);
+    if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
+                                     &pitch_effort)) {
+      DMMotorSetEffort(pitch_motor, &pitch_effort);
+    }
     break;
   }
   case GIMBAL_SYS_ID_CHIRP: {

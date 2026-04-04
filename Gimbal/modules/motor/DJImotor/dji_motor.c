@@ -390,6 +390,161 @@ void DJIMotorSetEffort(DJIMotorInstance *motor,
   }
 }
 
+uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
+                                Controller_Effort_Output_s *effort) {
+  Motor_Control_Setting_s *motor_setting = NULL;
+  Motor_Controller_s *motor_controller = NULL;
+  DJI_Motor_Measure_s *measure = NULL;
+  float pid_measure = 0.0f;
+  float pid_ref = ref;
+
+  if (motor == NULL || effort == NULL) {
+    return 0U;
+  }
+
+  motor_setting = &motor->motor_settings;
+  motor_controller = &motor->motor_controller;
+  measure = &motor->measure;
+  memset(effort, 0, sizeof(*effort));
+
+  if (motor_setting->controller_type == CONTROLLER_LQR) {
+    float angle_feedback = 0.0f;
+    float velocity_feedback = 0.0f;
+    float lqr_current_output = 0.0f;
+    float lqr_tau_ref = 0.0f;
+    float target_angle = pid_ref;
+
+    if (motor_setting->angle_feedback_source == OTHER_FEED)
+      angle_feedback = *motor_controller->other_angle_feedback_ptr;
+    else
+      angle_feedback = measure->total_angle;
+
+    if (motor_setting->speed_feedback_source == OTHER_FEED)
+      velocity_feedback = *motor_controller->other_speed_feedback_ptr;
+    else
+      velocity_feedback = measure->speed_aps;
+
+    if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE) {
+      angle_feedback *= -1.0f;
+      velocity_feedback *= -1.0f;
+    }
+
+    if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
+      target_angle *= -1.0f;
+
+    lqr_current_output = LQRCalculate(&motor_controller->LQR, angle_feedback,
+                                      velocity_feedback, target_angle);
+    if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
+      lqr_current_output += *motor_controller->current_feedforward_ptr;
+
+    lqr_tau_ref =
+        DJIMotorCurrentToTauRef(&motor->physical_param, lqr_current_output);
+    effort->semantic = CONTROLLER_OUTPUT_TAU_REF;
+    effort->tau_ref_nm = lqr_tau_ref;
+    motor_controller->output = lqr_tau_ref;
+    return 1U;
+  }
+
+  if (motor_setting->controller_type == CONTROLLER_SMC) {
+    float angle_feedback = 0.0f;
+    float velocity_feedback = 0.0f;
+    float target_ref = pid_ref;
+    float smc_output = 0.0f;
+    float smc_tau_ref = 0.0f;
+    float dt = DWT_GetDeltaT(&motor_controller->smc_dwt_cnt);
+
+    if (dt <= 0.0f || dt > 0.02f) {
+      dt = (motor_controller->smc.sample_period > 0.0f)
+               ? motor_controller->smc.sample_period
+               : ROBOT_CTRL_PERIOD_S;
+    }
+
+    if (motor_setting->angle_feedback_source == OTHER_FEED)
+      angle_feedback = *motor_controller->other_angle_feedback_ptr;
+    else
+      angle_feedback = measure->total_angle;
+
+    if (motor_setting->speed_feedback_source == OTHER_FEED)
+      velocity_feedback = *motor_controller->other_speed_feedback_ptr;
+    else
+      velocity_feedback = measure->speed_aps;
+
+    if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE) {
+      angle_feedback *= -1.0f;
+      velocity_feedback *= -1.0f;
+    }
+
+    if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
+      target_ref *= -1.0f;
+
+    SMC_ControllerSetSamplePeriod(&motor_controller->smc, dt);
+
+    if ((motor_setting->close_loop_type & ANGLE_LOOP) &&
+        motor_setting->outer_loop_type == ANGLE_LOOP) {
+      SMC_ControllerUpdatePositionError(&motor_controller->smc, target_ref,
+                                        angle_feedback, velocity_feedback);
+      smc_output = SMC_ControllerCalculate(&motor_controller->smc);
+    } else if ((motor_setting->close_loop_type & SPEED_LOOP) &&
+               motor_setting->outer_loop_type == SPEED_LOOP) {
+      if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
+        target_ref += *motor_controller->speed_feedforward_ptr;
+      SMC_ControllerUpdateVelocityError(&motor_controller->smc, target_ref,
+                                        velocity_feedback);
+      smc_output = SMC_ControllerCalculate(&motor_controller->smc);
+    }
+
+    if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
+      smc_output += *motor_controller->current_feedforward_ptr;
+
+    smc_output = float_constrain(smc_output, -16384.0f, 16384.0f);
+    smc_tau_ref =
+        DJIMotorRawCurrentToTauRef(&motor->physical_param, smc_output);
+    effort->semantic = CONTROLLER_OUTPUT_TAU_REF;
+    effort->tau_ref_nm = smc_tau_ref;
+    motor_controller->output = smc_tau_ref;
+    return 1U;
+  }
+
+  if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE)
+    pid_ref *= -1.0f;
+
+  if ((motor_setting->close_loop_type & ANGLE_LOOP) &&
+      motor_setting->outer_loop_type == ANGLE_LOOP) {
+    if (motor_setting->angle_feedback_source == OTHER_FEED)
+      pid_measure = *motor_controller->other_angle_feedback_ptr;
+    else
+      pid_measure = measure->total_angle;
+    pid_ref = PIDCalculate(&motor_controller->angle_PID, pid_measure, pid_ref);
+  }
+
+  if ((motor_setting->close_loop_type & SPEED_LOOP) &&
+      (motor_setting->outer_loop_type & (ANGLE_LOOP | SPEED_LOOP))) {
+    if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD)
+      pid_ref += *motor_controller->speed_feedforward_ptr;
+
+    if (motor_setting->speed_feedback_source == OTHER_FEED)
+      pid_measure = *motor_controller->other_speed_feedback_ptr;
+    else
+      pid_measure = measure->speed_aps;
+    pid_ref = PIDCalculate(&motor_controller->speed_PID, pid_measure, pid_ref);
+  }
+
+  if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
+    pid_ref += *motor_controller->current_feedforward_ptr;
+  if (motor_setting->close_loop_type & CURRENT_LOOP)
+    pid_ref = PIDCalculate(&motor_controller->current_PID, measure->real_current,
+                           pid_ref);
+
+  if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
+    pid_ref *= -1.0f;
+
+  effort->semantic = CONTROLLER_OUTPUT_TAU_REF;
+  effort->tau_ref_nm =
+      DJIMotorRawCurrentToTauRef(&motor->physical_param, pid_ref);
+  motor_controller->output = effort->tau_ref_nm;
+  return 1U;
+}
+
 void DJIMotorSetRawRef(DJIMotorInstance *motor, float raw_ref) {
   motor->motor_controller.pid_ref = raw_ref * DJIMotorGetRawRefSign(motor);
   memset(&motor->motor_controller.ref_effort, 0,
