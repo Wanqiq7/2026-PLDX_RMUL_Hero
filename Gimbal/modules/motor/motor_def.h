@@ -12,11 +12,56 @@
 #ifndef MOTOR_DEF_H
 #define MOTOR_DEF_H
 
+#include "bsp_can.h"
+#include "SMC_Controller.h"
 #include "controller.h"
 #include "stdint.h"
 
 #define LIMIT_MIN_MAX(x, min, max)                                             \
   (x) = (((x) <= (min)) ? (min) : (((x) >= (max)) ? (max) : (x)))
+
+typedef enum {
+  CONTROLLER_OUTPUT_INVALID = 0,
+  CONTROLLER_OUTPUT_TAU_REF,
+  CONTROLLER_OUTPUT_CURRENT_A,
+  CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
+} Controller_Output_Semantic_e;
+
+typedef struct {
+  Controller_Output_Semantic_e semantic;
+  float tau_ref_nm;      // output_shaft_torque [N·m]
+  float current_ref_a;
+  float raw_current_cmd;
+} Controller_Effort_Output_s;
+
+typedef struct {
+  float torque_constant_nm_per_a; // output_shaft_torque constant [N·m/A]
+  float current_to_raw_coeff;
+  float raw_to_current_coeff;
+  float torque_limit_nm;
+  float current_limit_a;
+} Motor_Physical_Param_s;
+
+typedef enum {
+  ACTUATOR_COMMAND_NONE = 0,
+  ACTUATOR_COMMAND_DJI_RAW_CURRENT,
+  ACTUATOR_COMMAND_DM_MIT_TORQUE,
+  ACTUATOR_COMMAND_DM_MIT_FULL,
+  ACTUATOR_COMMAND_DM_PVT,
+} Actuator_Command_Type_e;
+
+typedef struct {
+  Actuator_Command_Type_e type;
+  float raw_current_cmd;
+  float mit_angle_rad;
+  float mit_velocity_rad_s;
+  float mit_torque_nm;
+  float mit_kp;
+  float mit_kd;
+  float pvt_angle_rad;
+  float pvt_velocity_limit_rad_s;
+  float pvt_current_ratio;
+} Actuator_Command_s;
 
 /**
  * @brief 闭环类型,如果需要多个闭环,则使用或运算
@@ -63,7 +108,7 @@ typedef enum {
 typedef enum {
   CONTROLLER_PID = 0, // 使用PID控制器（默认）
   CONTROLLER_LQR = 1, // 使用LQR控制器
-  CONTROLLER_FC = 2,  // 使用力控控制器（Force Control）
+  CONTROLLER_SMC = 2, // 使用滑模控制器（Sliding Mode Control）
 } Controller_Type_e;
 
 typedef enum {
@@ -127,35 +172,9 @@ typedef struct {
   Feedback_Source_e angle_feedback_source;       // 角度反馈类型
   Feedback_Source_e speed_feedback_source;       // 速度反馈类型
   Feedfoward_Type_e feedforward_flag;            // 前馈标志
-  Controller_Type_e controller_type;             // 控制器类型 (PID/LQR)
+  Controller_Type_e controller_type;             // 控制器类型 (PID/LQR/SMC)
 
 } Motor_Control_Setting_s;
-
-/* 力控控制器初始化参数 */
-typedef struct {
-  float angle_loop_kp;
-  float angle_loop_ki;
-  float rate_loop_kp;
-  float rate_loop_ki;
-  float rate_ref_max;
-  float current_cmd_max;
-  float target_rate_ff_gain;
-  float target_rate_lpf_alpha;
-  float angle_err_integral_limit;
-  float rate_err_integral_limit;
-} FC_Init_Config_s;
-
-/* 力控控制器运行时状态 */
-typedef struct {
-  float angle_err_integral;
-  float rate_err_integral;
-  float current_cmd;
-  float target_rate_est;
-  float current_feedforward;
-  float last_target_angle_rad;
-  uint32_t dwt_cnt;
-  uint8_t inited;
-} FC_State_s;
 
 /* 电机控制器,包括其他来源的反馈数据指针,3环控制器和电机的参考输入*/
 // 后续增加前馈数据指针
@@ -170,11 +189,12 @@ typedef struct {
   PIDInstance angle_PID;
 
   LQRInstance LQR; // LQR控制器实例
-  FC_Init_Config_s fc_param;
-  FC_State_s fc_state;
+  SMC_ControllerInstance smc;
+  uint32_t smc_dwt_cnt;
 
   float pid_ref; // 将会作为每个环的输入和输出顺次通过串级闭环
   float output;  // 控制器最终输出（供LQR等直接控制使用）
+  Controller_Effort_Output_s controller_output;
 } Motor_Controller_s;
 
 /* 电机类型枚举 */
@@ -183,8 +203,6 @@ typedef enum {
   GM6020,
   M3508,
   M2006,
-  LK9025,
-  HT04,
 } Motor_Type_e;
 
 /**
@@ -203,13 +221,14 @@ typedef struct {
   PID_Init_Config_s speed_PID;
   PID_Init_Config_s angle_PID;
   LQR_Init_Config_s LQR; // LQR控制器初始化配置
-  FC_Init_Config_s fc;   // 力控控制器初始化配置
+  SMC_ControllerInitConfig_s smc; // 滑模控制器初始化配置
 } Motor_Controller_Init_s;
 
 /* 用于初始化CAN电机的结构体,各类电机通用 */
 typedef struct {
   Motor_Controller_Init_s controller_param_init_config;
   Motor_Control_Setting_s controller_setting_init_config;
+  Motor_Physical_Param_s physical_param;
   DM_MIT_Config_s mit_config; // 达妙 MIT 配置, 其他电机可忽略
   DM_PVT_Config_s pvt_config; // 达妙 PVT 配置，可选
   Motor_Type_e motor_type;

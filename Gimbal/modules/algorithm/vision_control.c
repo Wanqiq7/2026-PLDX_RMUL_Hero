@@ -1,7 +1,7 @@
 /**
  * @file vision_control.c
  * @brief 视觉控制算法模块实现
- * @note Module层：提供Yaw双环与Pitch限速参考
+ * @note Algorithm层：提供Yaw双环与Pitch限速参考
  */
 
 #include "vision_control.h"

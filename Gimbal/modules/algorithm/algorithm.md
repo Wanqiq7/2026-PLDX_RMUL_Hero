@@ -11,13 +11,14 @@
 
 module层的algorithm提供了一些供其他模块以及app的应用层使用的算法，包括：
 
-1. PID控制器`controller.h`
-2. crc8 crc16循环冗余校验
-3. 卡尔曼滤波器`kalman_filter.h`，可以通过用户自定义函数配置为扩展卡尔曼滤波
-4. `LQR.h`，线性二次型调节器
-5. `QuaterninoEKF.h`，用于`ins_task`的四元数姿态解算和扩展卡尔曼滤波融合
-6. `user_lib.h`，一些通用的函数，包括限幅、数据类型转换、角度弧度转换、快速符号判断以及优化开方等功能。多个模块都会使用的、不好区分的函数可以放置于此
-7. 一阶低通滤波
+1. PID/LQR控制器`controller.h`
+2. 完整移植版滑模控制器 `SMC_Controller.h`，包含 EXPONENT / POWER / TFSMC / VELSMC / EISMC 五种模式
+3. crc8 crc16循环冗余校验
+4. 卡尔曼滤波器`kalman_filter.h`，可以通过用户自定义函数配置为扩展卡尔曼滤波
+5. `LQR.h`，线性二次型调节器
+6. `QuaterninoEKF.h`，用于`ins_task`的四元数姿态解算和扩展卡尔曼滤波融合
+7. `user_lib.h`，一些通用的函数，包括限幅、数据类型转换、角度弧度转换、快速符号判断以及优化开方等功能。多个模块都会使用的、不好区分的函数可以放置于此
+8. 一阶低通滤波
 
 ## 代码结构
 

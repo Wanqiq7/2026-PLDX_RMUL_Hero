@@ -1,4 +1,5 @@
 #include "dmmotor.h"
+#include "dmmotor_adapter.h"
 
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -426,6 +427,11 @@ void DMMotorTask(void const *argument) {
   const float speed_limit_deg_min = motor->mit_limit.omega_min * RAD_TO_DEG;
 
   while (1) {
+    Controller_Effort_Output_s effort_output = {
+        .semantic = CONTROLLER_OUTPUT_TAU_REF,
+    };
+    Controller_Effort_Output_s normalized_output = {0};
+    Actuator_Command_s actuator_command = {0};
     if (motor->measure.mos_temp_c > 100.0f ||
         motor->measure.rotor_temp_c > 100.0f) {
       motor->stop_flag = MOTOR_STOP;
@@ -551,6 +557,14 @@ void DMMotorTask(void const *argument) {
                   motor->mit_limit.torque_max);
     LIMIT_MIN_MAX(target_kp, motor->mit_limit.kp_min, motor->mit_limit.kp_max);
     LIMIT_MIN_MAX(target_kd, motor->mit_limit.kd_min, motor->mit_limit.kd_max);
+
+    effort_output.tau_ref_nm = target_torque;
+    if (!DMMotorBuildMitTorqueCommand(&effort_output, motor->mit_limit.torque_max,
+                                      &actuator_command, &normalized_output)) {
+      memset(&actuator_command, 0, sizeof(actuator_command));
+      memset(&normalized_output, 0, sizeof(normalized_output));
+    }
+    target_torque = actuator_command.mit_torque_nm;
 
   pack_and_send:
     motor_send_mailbox.angle_cmd_raw = float_to_uint(

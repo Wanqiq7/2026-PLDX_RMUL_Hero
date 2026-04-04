@@ -238,7 +238,7 @@ typedef struct
 - `SPEED_SMOOTH_COEF`和`CURRENT_SMOOTH_COEF`是电机反馈的电流和速度数据低通滤波器惯性系数，数值越小平滑效果越大，但滞后也越大。设定时不应当低于推荐值。
 - `dji_motor_measure`是DJI电机的反馈信息，包括当前编码器值、上次测量编码器值、速度、电流、温度、总圈数和单圈角度。
 
-- `Motor_Control_Setting_s`的定义在`motor_def.h`之中，它和`Motor_Controller_s`都是所有电机通用的组件（如M3508，LK9025，HT04，MT6023等），其包含内容如下：
+- `Motor_Control_Setting_s`的定义在`motor_def.h`之中，它和`Motor_Controller_s`都是所有动力电机通用的组件（如M3508、M2006、GM6020等），其包含内容如下：
 
   ```c
   typedef struct /* 电机控制配置 */

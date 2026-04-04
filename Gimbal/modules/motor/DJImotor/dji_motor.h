@@ -56,6 +56,7 @@ typedef struct {
   uint8_t sender_group;
   uint8_t message_num;
 
+  Motor_Physical_Param_s physical_param;
   Motor_Type_e motor_type;        // 电机类型
   Motor_Working_Type_e stop_flag; // 启停标志
 
@@ -142,7 +143,7 @@ void DJIMotorEnable(DJIMotorInstance *motor);
 void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop);
 
 /**
- * @brief 切换电机控制器类型（PID/LQR/FC）
+ * @brief 切换电机控制器类型（PID/LQR/SMC）
  *
  * @param motor 要切换控制器的电机实例指针
  * @param controller_type 控制器类型
@@ -151,6 +152,9 @@ void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop);
  *        1. 已在初始化时配置好LQR参数
  *        2. angle_feedback_source 和 speed_feedback_source 已正确设置
  *        3. LQR参数已通过系统辨识获得（否则使用默认值可能不稳定）
+ *        切换到SMC模式前，需要确保：
+ *        1. 已在初始化时配置好SMC参数和模式
+ *        2. 输出单位与目标电机最终控制量一致（例如 DJI 原始电流量）
  */
 void DJIMotorChangeController(DJIMotorInstance *motor,
                               Controller_Type_e controller_type);

@@ -132,7 +132,7 @@ modules/imu/BMI088Middleware.c \
 modules/imu/ins_task.c \
 modules/ist8310/ist8310.c \
 modules/vision_comm/vision_comm.c \
-modules/vision_control/vision_control.c \
+modules/algorithm/vision_control.c \
 modules/motor/DJImotor/dji_motor.c \
 modules/motor/HTmotor/HT04.c \
 modules/motor/LKmotor/LK9025.c \
@@ -251,7 +251,6 @@ C_INCLUDES =  \
 -Ibsp/pwm \
 -Ibsp \
 -Imodules/algorithm \
--Imodules/vision_control \
 -Imodules/bluetooth \
 -Imodules/BMI088 \
 -Imodules/imu \

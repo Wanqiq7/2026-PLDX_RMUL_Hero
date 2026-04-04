@@ -23,11 +23,11 @@
 #define DEG_TO_RAD ((float)M_PI / 180.0f)
 
 /* ============================================================
- * 视觉自瞄与 Yaw FC（Force Control）链路
+ * 视觉自瞄与 Yaw 控制链路
  * ============================================================
  * 思路：
- * - 云台应用层负责模式编排与视觉接管，不再内嵌 Yaw 力控控制核。
- * - Yaw：手动/回退链路使用 DJI 电机层 CONTROLLER_FC。
+ * - 云台应用层负责模式编排与视觉接管。
+ * - Yaw：手动/回退链路使用 DJI 电机层 PID 控制器。
  * - Yaw：视觉直接给电流时，仍沿用 OPEN_LOOP 原始电流发送链路。
  * - Pitch：继续使用达妙 MIT 目标组装逻辑。
  * ============================================================ */
@@ -122,18 +122,9 @@ void GimbalInit() {
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 2000.0f,
                   },
-              .fc =
+              .smc =
                   {
-                      .angle_loop_kp = 18.0f,
-                      .angle_loop_ki = 0.8f,
-                      .rate_loop_kp = 18000.0f,
-                      .rate_loop_ki = 1200.0f,
-                      .rate_ref_max = 8.0f,
-                      .current_cmd_max = 15000.0f,
-                      .target_rate_ff_gain = 0.35f,
-                      .target_rate_lpf_alpha = 0.25f,
-                      .angle_err_integral_limit = 0.8f,
-                      .rate_err_integral_limit = 2000.0f,
+                      .sample_period = ROBOT_CTRL_PERIOD_S,
                   },
               .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
@@ -248,7 +239,7 @@ void GimbalTask() {
     yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
     yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
     DJIMotorSetRef(yaw_motor, yaw_ref_rad);
-    DJIMotorChangeController(yaw_motor, CONTROLLER_FC);
+    DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
     DMMotorEnable(pitch_motor);
     DMMotorSelectMITProfile(pitch_motor, DM_MIT_PROFILE_MANUAL);
     DMMotorSetMITTargetByProfile(pitch_motor, pitch_ref_rad);
@@ -267,7 +258,7 @@ void GimbalTask() {
       yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
       yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
       DJIMotorSetRef(yaw_motor, yaw_ref_rad);
-      DJIMotorChangeController(yaw_motor, CONTROLLER_FC);
+      DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
     }
 
     if (vision_takeover) {

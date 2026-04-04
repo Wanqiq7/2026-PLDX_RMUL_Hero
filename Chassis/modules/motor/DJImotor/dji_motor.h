@@ -56,6 +56,7 @@ typedef struct {
   uint8_t sender_group;
   uint8_t message_num;
 
+  Motor_Physical_Param_s physical_param;
   Motor_Type_e motor_type;        // 电机类型
   Motor_Working_Type_e stop_flag; // 启停标志
 

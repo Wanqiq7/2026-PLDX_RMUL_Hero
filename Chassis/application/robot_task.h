@@ -6,7 +6,6 @@
 #include "main.h"
 #include "task.h"
 
-#include "HT04.h"
 #include "buzzer.h"
 #include "daemon.h"
 #include "ins_task.h"
@@ -66,8 +65,6 @@ void OSTaskInit() {
   osThreadDef(sysidtask, StartSYSIDTASK, osPriorityAboveNormal, 0, 512);
   sysidTaskHandle = osThreadCreate(osThread(sysidtask), NULL);
 
-
-  HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
 
 __attribute__((noreturn)) void StartINSTASK(void const *argument) {

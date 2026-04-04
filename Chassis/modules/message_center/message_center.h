@@ -44,7 +44,6 @@ typedef struct ent
     Subscriber_t *first_subs;
     /* 指向下一个Publisher的指针 */
     struct ent *next_topic_node;
-    uint8_t pub_registered_flag; // 用于标记该发布者是否已经注册
 } Publisher_t;
 
 /**
@@ -52,7 +51,7 @@ typedef struct ent
  *
  * @param name 话题名称
  * @param data_len 消息长度,通过sizeof()获取
- * @return Subscriber_t* 返回订阅者实例
+ * @return Subscriber_t* 返回订阅者实例,若内存不足或超过话题数量上限则返回NULL
  */
 Subscriber_t *RegisterSubscriber(char *name, uint8_t data_len);
 
@@ -60,7 +59,7 @@ Subscriber_t *RegisterSubscriber(char *name, uint8_t data_len);
  * @brief 注册成为消息发布者
  *
  * @param name 发布者发布的话题名称(话题)
- * @return Publisher_t* 返回发布者实例
+ * @return Publisher_t* 返回发布者实例,若内存不足或超过话题数量上限则返回NULL
  */
 Publisher_t *RegisterPublisher(char *name, uint8_t data_len);
 
@@ -78,7 +77,7 @@ uint8_t SubGetMessage(Subscriber_t *sub, void *data_ptr);
  *
  * @param pub 发布者实例指针
  * @param data_ptr 指向要发布的数据的指针
- * @return uint8_t 新消息成功推送给几个订阅者
+ * @return uint8_t 新消息成功推送给几个订阅者,若没有订阅者或入参非法则返回0
  */
 uint8_t PubPushMessage(Publisher_t *pub, void *data_ptr);
 

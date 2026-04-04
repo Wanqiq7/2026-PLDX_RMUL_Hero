@@ -1,4 +1,5 @@
 #include "dmmotor.h"
+#include "dmmotor_adapter.h"
 #include "memory.h"
 #include "general_def.h"
 #include "user_lib.h"
@@ -128,6 +129,11 @@ void DMMotorTask(void const *argument)
     DMMotor_Send_s motor_send_mailbox;
     while (1)
     {
+        Controller_Effort_Output_s effort_output = {
+            .semantic = CONTROLLER_OUTPUT_TAU_REF,
+        };
+        Controller_Effort_Output_s normalized_output = {0};
+        Actuator_Command_s actuator_command = {0};
         pid_ref = motor->pid_ref;
         
         set = pid_ref;
@@ -135,9 +141,18 @@ void DMMotorTask(void const *argument)
             set *= -1;
        
         LIMIT_MIN_MAX(set, DM_T_MIN, DM_T_MAX);
+        effort_output.tau_ref_nm = set;
+        if (!DMMotorBuildMitTorqueCommand(&effort_output, DM_T_MAX,
+                                          &actuator_command,
+                                          &normalized_output))
+        {
+            memset(&actuator_command, 0, sizeof(actuator_command));
+            memset(&normalized_output, 0, sizeof(normalized_output));
+        }
+
         motor_send_mailbox.position_des = float_to_uint(0, DM_P_MIN, DM_P_MAX, 16);
         motor_send_mailbox.velocity_des = float_to_uint(0, DM_V_MIN, DM_V_MAX, 12);
-        motor_send_mailbox.torque_des = float_to_uint(pid_ref, DM_T_MIN, DM_T_MAX, 12);
+        motor_send_mailbox.torque_des = float_to_uint(actuator_command.mit_torque_nm, DM_T_MIN, DM_T_MAX, 12);
         motor_send_mailbox.Kp = 0;
         motor_send_mailbox.Kd = 0;
 

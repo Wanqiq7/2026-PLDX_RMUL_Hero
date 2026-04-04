@@ -134,9 +134,9 @@ float LQRCalculate(LQRInstance *lqr, float measure_angle,
 
 ✅ **面向对象设计**
 ```c
-// 类似PID和SMC的设计模式
-PIDInstance, SMCInstance → LQRInstance
-PIDInit, SMCInit → LQRInit
+// 类似现有控制器模块的设计模式
+PIDInstance, SMC_ControllerInstance → LQRInstance
+PIDInit, SMC_ControllerInit → LQRInit
 PIDCalculate, SMCCalculate → LQRCalculate
 ```
 
@@ -468,4 +468,3 @@ u* = -Kx，K由Riccati方程求解
 ---
 
 **感谢使用LQR控制器模块！祝您的机器人性能卓越！🏆**
-

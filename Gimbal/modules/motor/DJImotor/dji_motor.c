@@ -1,8 +1,10 @@
 #include "dji_motor.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
-#include "fc_controller.h"
+#include "dji_motor_adapter.h"
 #include "general_def.h"
+#include "robot_def.h"
+#include "user_lib.h"
 
 static uint8_t idx = 0; // register idx,是该文件的全局电机索引,在注册时使用
 /* DJI电机的实例,此处仅保存指针,内存的分配将通过电机实例初始化时通过malloc()进行
@@ -21,6 +23,15 @@ static float DJIMotorGetRawRefSign(const DJIMotorInstance *motor) {
     sign *= -1.0f;
   }
   return sign;
+}
+
+static void DJIMotorResetSMCState(DJIMotorInstance *motor, float target_ref) {
+  if (motor == NULL) {
+    return;
+  }
+
+  SMC_ControllerResetState(&motor->motor_controller.smc, target_ref);
+  DWT_GetDeltaT(&motor->motor_controller.smc_dwt_cnt);
 }
 
 /**
@@ -211,6 +222,7 @@ static void DJIMotorLostCallback(void *motor_ptr) {
 
 // 电机初始化,返回一个电机实例
 DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config) {
+  uint8_t physical_param_valid = 0U;
   DJIMotorInstance *instance =
       (DJIMotorInstance *)malloc(sizeof(DJIMotorInstance));
   memset(instance, 0, sizeof(DJIMotorInstance));
@@ -219,6 +231,12 @@ DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config) {
   instance->motor_type = config->motor_type; // 6020 or 2006 or 3508
   instance->motor_settings =
       config->controller_setting_init_config; // 正反转,闭环类型等
+  physical_param_valid = DJIMotorResolvePhysicalParam(
+      config->motor_type, &config->physical_param, &instance->physical_param);
+  if (!physical_param_valid) {
+    LOGERROR("[dji_motor] invalid physical parameters for motor_type=%d",
+             config->motor_type);
+  }
 
   // motor controller init 电机控制器初始化
   PIDInit(&instance->motor_controller.current_PID,
@@ -229,9 +247,9 @@ DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config) {
           &config->controller_param_init_config.angle_PID);
   LQRInit(&instance->motor_controller.LQR,
           &config->controller_param_init_config.LQR);
-  instance->motor_controller.fc_param =
-      config->controller_param_init_config.fc;
-  FCInit(&instance->motor_controller.fc_state);
+  SMC_ControllerInitFromConfig(&instance->motor_controller.smc,
+                               &config->controller_param_init_config.smc);
+  DWT_GetDeltaT(&instance->motor_controller.smc_dwt_cnt);
   instance->motor_controller.other_angle_feedback_ptr =
       config->controller_param_init_config.other_angle_feedback_ptr;
   instance->motor_controller.other_speed_feedback_ptr =
@@ -258,7 +276,9 @@ DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config) {
   };
   instance->daemon = DaemonRegister(&daemon_config);
 
-  DJIMotorEnable(instance);
+  if (physical_param_valid) {
+    DJIMotorEnable(instance);
+  }
   dji_motor_instance[idx++] = instance;
   return instance;
 }
@@ -282,7 +302,7 @@ void DJIMotorStop(DJIMotorInstance *motor) {
   PIDReset(&motor->motor_controller.current_PID);
   PIDReset(&motor->motor_controller.speed_PID);
   PIDReset(&motor->motor_controller.angle_PID);
-  FCReset(&motor->motor_controller.fc_state, 0.0f);
+  DJIMotorResetSMCState(motor, 0.0f);
 }
 
 void DJIMotorEnable(DJIMotorInstance *motor) {
@@ -302,25 +322,29 @@ void DJIMotorOuterLoop(DJIMotorInstance *motor, Closeloop_Type_e outer_loop) {
   } else if (outer_loop == SPEED_LOOP) {
     PIDReset(&motor->motor_controller.speed_PID);
   }
+
+  if (motor->motor_settings.controller_type == CONTROLLER_SMC) {
+    DJIMotorResetSMCState(motor, motor->motor_controller.pid_ref);
+  }
 }
 
-/* 切换电机控制器类型（PID或LQR） */
+/* 切换电机控制器类型（PID/LQR/SMC） */
 void DJIMotorChangeController(DJIMotorInstance *motor,
                               Controller_Type_e controller_type) {
   if (motor->motor_settings.controller_type == controller_type) {
     return;
   }
 
-  if (motor->motor_settings.controller_type == CONTROLLER_FC) {
-    FCReset(&motor->motor_controller.fc_state, 0.0f);
+  if (motor->motor_settings.controller_type == CONTROLLER_SMC) {
+    DJIMotorResetSMCState(motor, 0.0f);
   }
 
   motor->motor_settings.controller_type = controller_type;
 
   if (controller_type == CONTROLLER_LQR) {
     LQRReset(&motor->motor_controller.LQR);
-  } else if (controller_type == CONTROLLER_FC) {
-    FCReset(&motor->motor_controller.fc_state, motor->motor_controller.pid_ref);
+  } else if (controller_type == CONTROLLER_SMC) {
+    DJIMotorResetSMCState(motor, motor->motor_controller.pid_ref);
   } else {
     PIDReset(&motor->motor_controller.current_PID);
     PIDReset(&motor->motor_controller.speed_PID);
@@ -403,19 +427,32 @@ void DJIMotorControl() {
       if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD)
         lqr_current_output += *motor_controller->current_feedforward_ptr;
 
-      // 电流(A) → CAN指令值
-      // GM6020: 16384/20A=819.2, M3508/M2006: 16384/20A=819.2
-      set = (int16_t)(lqr_current_output * 819.2f);
-
-      // 保存输出到controller，供调试使用
+      Controller_Effort_Output_s effort_output = {
+          .semantic = CONTROLLER_OUTPUT_CURRENT_A,
+          .current_ref_a = lqr_current_output,
+      };
+      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
+                                             &effort_output, &set,
+                                             &motor_controller->controller_output)) {
+        set = 0;
+        memset(&motor_controller->controller_output, 0,
+               sizeof(motor_controller->controller_output));
+      }
       motor_controller->output = lqr_current_output;
     }
-    // ==================== FC控制器分支 ====================
-    else if (motor_setting->controller_type == CONTROLLER_FC) {
-      float angle_feedback;
-      float velocity_feedback;
-      float fc_current_output;
-      float dt;
+    // ==================== SMC控制器分支 ====================
+    else if (motor_setting->controller_type == CONTROLLER_SMC) {
+      float angle_feedback = 0.0f;
+      float velocity_feedback = 0.0f;
+      float target_ref = pid_ref;
+      float smc_output = 0.0f;
+      float dt = DWT_GetDeltaT(&motor_controller->smc_dwt_cnt);
+
+      if (dt <= 0.0f || dt > 0.02f) {
+        dt = (motor_controller->smc.sample_period > 0.0f)
+                 ? motor_controller->smc.sample_period
+                 : ROBOT_CTRL_PERIOD_S;
+      }
 
       if (motor_setting->angle_feedback_source == OTHER_FEED) {
         angle_feedback = *motor_controller->other_angle_feedback_ptr;
@@ -429,20 +466,49 @@ void DJIMotorControl() {
         velocity_feedback = measure->speed_aps;
       }
 
-      dt = DWT_GetDeltaT(&motor_controller->fc_state.dwt_cnt);
-
-      fc_current_output =
-          FCCalculate(&motor_controller->fc_param, &motor_controller->fc_state,
-                      pid_ref, angle_feedback, velocity_feedback, dt);
-
-      if (fc_current_output > 16384.0f) {
-        fc_current_output = 16384.0f;
-      } else if (fc_current_output < -16384.0f) {
-        fc_current_output = -16384.0f;
+      if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE) {
+        angle_feedback *= -1.0f;
+        velocity_feedback *= -1.0f;
       }
 
-      set = (int16_t)fc_current_output;
-      motor_controller->output = fc_current_output;
+      if (motor_setting->motor_reverse_flag == MOTOR_DIRECTION_REVERSE) {
+        target_ref *= -1.0f;
+      }
+
+      SMC_ControllerSetSamplePeriod(&motor_controller->smc, dt);
+
+      if ((motor_setting->close_loop_type & ANGLE_LOOP) &&
+          motor_setting->outer_loop_type == ANGLE_LOOP) {
+        SMC_ControllerUpdatePositionError(&motor_controller->smc, target_ref,
+                                          angle_feedback, velocity_feedback);
+        smc_output = SMC_ControllerCalculate(&motor_controller->smc);
+      } else if ((motor_setting->close_loop_type & SPEED_LOOP) &&
+                 motor_setting->outer_loop_type == SPEED_LOOP) {
+        if (motor_setting->feedforward_flag & SPEED_FEEDFORWARD) {
+          target_ref += *motor_controller->speed_feedforward_ptr;
+        }
+        SMC_ControllerUpdateVelocityError(&motor_controller->smc, target_ref,
+                                          velocity_feedback);
+        smc_output = SMC_ControllerCalculate(&motor_controller->smc);
+      }
+
+      if (motor_setting->feedforward_flag & CURRENT_FEEDFORWARD) {
+        smc_output += *motor_controller->current_feedforward_ptr;
+      }
+
+      smc_output = float_constrain(smc_output, -16384.0f, 16384.0f);
+      Controller_Effort_Output_s effort_output = {
+          .semantic = CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
+          .raw_current_cmd = smc_output,
+      };
+      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
+                                             &effort_output, &set,
+                                             &motor_controller->controller_output)) {
+        set = 0;
+        memset(&motor_controller->controller_output, 0,
+               sizeof(motor_controller->controller_output));
+      }
+      motor_controller->output = smc_output;
     }
     // ==================== PID控制器分支（原有逻辑）====================
     else // CONTROLLER_PID
@@ -490,8 +556,17 @@ void DJIMotorControl() {
       if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
         pid_ref *= -1;
 
-      // 获取最终输出
-      set = (int16_t)pid_ref;
+      Controller_Effort_Output_s effort_output = {
+          .semantic = CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
+          .raw_current_cmd = pid_ref,
+      };
+      if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
+                                             &effort_output, &set,
+                                             &motor_controller->controller_output)) {
+        set = 0;
+        memset(&motor_controller->controller_output, 0,
+               sizeof(motor_controller->controller_output));
+      }
     }
 
     // 分组填入发送数据

@@ -12,10 +12,54 @@
 #ifndef MOTOR_DEF_H
 #define MOTOR_DEF_H
 
+#include "bsp_can.h"
 #include "controller.h"
 #include "stdint.h"
 
 #define LIMIT_MIN_MAX(x, min, max) (x) = (((x) <= (min)) ? (min) : (((x) >= (max)) ? (max) : (x)))
+
+typedef enum {
+    CONTROLLER_OUTPUT_INVALID = 0,
+    CONTROLLER_OUTPUT_TAU_REF,
+    CONTROLLER_OUTPUT_CURRENT_A,
+    CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
+} Controller_Output_Semantic_e;
+
+typedef struct {
+  Controller_Output_Semantic_e semantic;
+  float tau_ref_nm;      // output_shaft_torque [N·m]
+  float current_ref_a;
+  float raw_current_cmd;
+} Controller_Effort_Output_s;
+
+typedef struct {
+    float torque_constant_nm_per_a; // output_shaft_torque constant [N·m/A]
+    float current_to_raw_coeff;
+    float raw_to_current_coeff;
+    float torque_limit_nm;
+    float current_limit_a;
+} Motor_Physical_Param_s;
+
+typedef enum {
+    ACTUATOR_COMMAND_NONE = 0,
+    ACTUATOR_COMMAND_DJI_RAW_CURRENT,
+    ACTUATOR_COMMAND_DM_MIT_TORQUE,
+    ACTUATOR_COMMAND_DM_MIT_FULL,
+    ACTUATOR_COMMAND_DM_PVT,
+} Actuator_Command_Type_e;
+
+typedef struct {
+    Actuator_Command_Type_e type;
+    float raw_current_cmd;
+    float mit_angle_rad;
+    float mit_velocity_rad_s;
+    float mit_torque_nm;
+    float mit_kp;
+    float mit_kd;
+    float pvt_angle_rad;
+    float pvt_velocity_limit_rad_s;
+    float pvt_current_ratio;
+} Actuator_Command_s;
 
 /**
  * @brief 闭环类型,如果需要多个闭环,则使用或运算
@@ -95,6 +139,7 @@ typedef struct
     PIDInstance angle_PID;
 
     float pid_ref; // 将会作为每个环的输入和输出顺次通过串级闭环
+    Controller_Effort_Output_s controller_output;
 } Motor_Controller_s;
 
 /* 电机类型枚举 */
@@ -104,8 +149,6 @@ typedef enum
     GM6020,
     M3508,
     M2006,
-    LK9025,
-    HT04,
 } Motor_Type_e;
 
 /**
@@ -131,6 +174,7 @@ typedef struct
 {
     Motor_Controller_Init_s controller_param_init_config;
     Motor_Control_Setting_s controller_setting_init_config;
+    Motor_Physical_Param_s physical_param;
     Motor_Type_e motor_type;
     CAN_Init_Config_s can_init_config;
 } Motor_Init_Config_s;

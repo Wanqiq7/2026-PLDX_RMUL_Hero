@@ -2,6 +2,7 @@
 #include "general_def.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include "dji_motor_adapter.h"
 
 static uint8_t idx = 0; // register idx,是该文件的全局电机索引,在注册时使用
 /* DJI电机的实例,此处仅保存指针,内存的分配将通过电机实例初始化时通过malloc()进行 */
@@ -158,12 +159,19 @@ static void DJIMotorLostCallback(void *motor_ptr)
 // 电机初始化,返回一个电机实例
 DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config)
 {
+    uint8_t physical_param_valid = 0U;
     DJIMotorInstance *instance = (DJIMotorInstance *)malloc(sizeof(DJIMotorInstance));
     memset(instance, 0, sizeof(DJIMotorInstance));
 
     // motor basic setting 电机基本设置
     instance->motor_type = config->motor_type;                         // 6020 or 2006 or 3508
     instance->motor_settings = config->controller_setting_init_config; // 正反转,闭环类型等
+    physical_param_valid = DJIMotorResolvePhysicalParam(config->motor_type, &config->physical_param,
+                                                        &instance->physical_param);
+    if (!physical_param_valid)
+    {
+        LOGERROR("[dji_motor] invalid physical parameters for motor_type=%d", config->motor_type);
+    }
 
     // motor controller init 电机控制器初始化
     PIDInit(&instance->motor_controller.current_PID, &config->controller_param_init_config.current_PID);
@@ -191,7 +199,10 @@ DJIMotorInstance *DJIMotorInit(Motor_Init_Config_s *config)
     };
     instance->daemon = DaemonRegister(&daemon_config);
 
-    DJIMotorEnable(instance);
+    if (physical_param_valid)
+    {
+        DJIMotorEnable(instance);
+    }
     dji_motor_instance[idx++] = instance;
     return instance;
 }
@@ -289,8 +300,19 @@ void DJIMotorControl()
         if (motor_setting->feedback_reverse_flag == FEEDBACK_DIRECTION_REVERSE)
             pid_ref *= -1;
 
-        // 获取最终输出
-        set = (int16_t)pid_ref;
+        Controller_Effort_Output_s effort_output = {
+            .semantic = CONTROLLER_OUTPUT_RAW_CURRENT_CMD,
+            .raw_current_cmd = pid_ref,
+        };
+
+        if (!DJIMotorBuildRawCommandFromEffort(&motor->physical_param,
+                                               &effort_output, &set,
+                                               &motor_controller->controller_output))
+        {
+            set = 0;
+            memset(&motor_controller->controller_output, 0,
+                   sizeof(motor_controller->controller_output));
+        }
 
         // 分组填入发送数据
         group = motor->sender_group;

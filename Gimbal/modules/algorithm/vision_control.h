@@ -1,7 +1,7 @@
 /**
  * @file vision_control.h
  * @brief 视觉控制算法模块接口
- * @note Module层：提供Yaw双环控制与Pitch限速参考生成
+ * @note Algorithm层：提供Yaw双环控制与Pitch限速参考生成
  */
 
 #ifndef VISION_CONTROL_H

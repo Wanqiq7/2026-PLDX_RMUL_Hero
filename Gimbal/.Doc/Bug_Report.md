@@ -32,24 +32,6 @@
 
 当然，最快的方法是在群里提问。
 
-## 使用LK电机并挂载在hcan2上时会出现HardFault
-
-> 已修复此问题。修复日志请查看当前目录下的“如何定位bug.md”。
-
-使用MF9025v2电机,并将其配置在CAN2上。经过一次LKMotorControl，第二次进入时hcan->instance会在HAL_CAN_Add_Tx_Message()结束时被未知的语句修改成奇怪的值，造成HardFault
-
-### 尝试解决的方案
-
-单步调试无果，在HAL_CAN_Add_Tx_Message()返回的那一步hcan->instance会莫名其妙变成0，hcan2也会被修改到一个0x8000xxx的地址上(hcan是HAL库自定的全局变量)
-
-### 如何复现问题
-
-使用LK电机并将其挂载在CAN2上，连接电机后直接运行。在第二次进入MotorTAsk中的LKMotorControl时，于检查空闲CAN邮箱时，由于hcan2被修改，访问CAN2外设状态时会访问野指针导致HardFault。
-
-### 紧急程度
-
-⭐⭐⭐⭐⭐
-
 ## 总线挂载多个电机后,pitch和yaw的GM6020电机出现编码器反馈值跳动
 
 > 已修复，详细信息见“如何定位bug.md”
