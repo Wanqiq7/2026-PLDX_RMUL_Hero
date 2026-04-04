@@ -50,6 +50,24 @@ Pitch_ref / Pitch_feedback / Gyro_feedback
 
 `MIT full / profile / PVT` 仍然保留在 `DMmotor` 中，作为兼容或扩展能力，不再是 Pitch 常规控制主线。
 
+### 当前 APP 层接线
+
+`gimbal.c` 中常规动力链路现在统一为：
+
+```text
+参考值
+-> modules/motor 内部 CalculateEffort
+-> SetEffort
+-> adapter / protocol
+```
+
+只有视觉原始电流接管仍保留为显式 bypass：
+
+```text
+vision_takeover
+-> DJIMotorSetRawRef()
+```
+
 ### LQR 模式
 
 `GIMBAL_LQR_MODE` 仍保留为独立模式。进入该模式时，Yaw 轴恢复电机库的非直控配置，并切换到 `CONTROLLER_LQR`。

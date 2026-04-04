@@ -19,6 +19,19 @@
 
 > 建议：优先用 `motor_reverse_flag` 把“遥控器/上层期望方向”与“电机转动方向”对齐；若仅反馈方向相反，再使用 `feedback_reverse_flag`。
 
+## 当前主线
+
+`DMmotor` 当前推荐的常规动力执行器主线是：
+
+```text
+DMMotorCalculateTorqueEffort()
+-> Controller_Effort_Output(TAU_REF)
+-> DMMotorSetEffort()
+-> torque-only MIT
+```
+
+`DMMotorSetRef()` 仍保留为兼容接口，但 `Gimbal` 常规主线已经优先改为 `CalculateEffort -> SetEffort`。
+
 ## 常见配置建议
 
 - 云台 Pitch 轴（PVT 控制）方向相反：将 `Motor_Init_Config_s.controller_setting_init_config.motor_reverse_flag` 设为 `MOTOR_DIRECTION_REVERSE`。
