@@ -21,20 +21,17 @@
 
 ### Yaw 轴（GM6020）
 
-当前 `GIMBAL_GYRO_MODE` 与 `GIMBAL_AUTOAIM_MODE` 下，Yaw 轴统一采用“准力矩直控”主链路：
-
-1. 目标角度变化率估计得到目标角速度前馈
-2. 角度误差生成角速度参考
-3. 角速度误差生成电流指令
-4. 将 `yaw_motor` 切换为 `OPEN_LOOP`，由 DJI 电机库仅负责组帧发送
-
-这条链路的控制语义是：
+当前 `GIMBAL_GYRO_MODE` 与 `GIMBAL_AUTOAIM_MODE` 下，Yaw 轴统一采用闭环扭矩主链路：
 
 ```text
-目标角度 -> 角速度参考 -> 电流/力矩指令
+yaw_ref / yaw_rate_ff
+-> DJIMotorCalculateEffort()
+-> Controller_Effort_Output(TAU_REF)
+-> DJIMotorSetEffort()
+-> adapter / raw current cmd
 ```
 
-不再将角度参考直接交给电机内部串级 PID，从而让手动与自瞄回退路径共享同一套 Yaw 控制语义，减小模式切换突变。
+视觉接管时，视觉模块只提供参考值与速度前馈，不再通过原始电流接口直接旁路驱动电机。
 
 ### Pitch 轴（DM, MIT）
 
@@ -42,9 +39,9 @@ Pitch 轴当前主线已调整为“模块内串级 PID -> torque-only MIT”：
 
 ```text
 Pitch_ref / Pitch_feedback / Gyro_feedback
--> DMMotorSetRef()
--> angle PID 输出 speed_ref
--> speed PID 输出 tau_ref
+-> DMMotorCalculateTorqueEffort()
+-> Controller_Effort_Output(TAU_REF)
+-> DMMotorSetEffort()
 -> MIT torque-only (angle/velocity/kp/kd 置零)
 ```
 
@@ -61,12 +58,7 @@ Pitch_ref / Pitch_feedback / Gyro_feedback
 -> adapter / protocol
 ```
 
-只有视觉原始电流接管仍保留为显式 bypass：
-
-```text
-vision_takeover
--> DJIMotorSetRawRef()
-```
+自瞄接管后的常规链路也统一走 `SetEffort` 主线，不再保留原始电流旁路作为默认方案。
 
 ### LQR 模式
 
@@ -105,7 +97,7 @@ vision_takeover
 - 速度环响应不理想，需要重新优化参数
 
 **注意事项：**
-- 需要实现 `DJIMotorSetRawRef()` 函数以支持 OPEN_LOOP 原始电流控制
+- 若保留历史系统辨识方案，需单独维护原始电流激励接口；该接口不属于当前常规控制主线
 - 建议幅值从小开始尝试，避免电机过载
 - 如果电机震动剧烈，立即停止并降低幅值
 
@@ -407,7 +399,7 @@ SystemID_Init(SYS_ID_MODE_OFF);
 - 延长扫频时间以提高频率分辨率
 
 **问题4：辨识结果不理想**
-- 确保速度环辨识时实现了 `DJIMotorSetRawRef()` 函数
+- 确保速度环辨识所需的历史原始激励接口仍可用
 - 角度环辨识前先确保速度环已整定好
 - 检查传感器反馈是否准确（IMU、编码器）
 

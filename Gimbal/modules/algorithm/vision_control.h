@@ -14,12 +14,7 @@
 typedef struct {
   // Yaw位置环参数
   float yaw_pos_kp; // [rad/s per rad] 位置环比例增益
-  float yaw_pos_ki; // [rad/s per rad*s] 位置环积分增益
-  // Yaw速度环参数
-  float yaw_rate_kp;     // [raw per rad/s] 速度环比例增益
-  float yaw_rate_ki;     // [raw per rad/s*s] 速度环积分增益
-  float yaw_rate_max;    // [rad/s] 角速度参考限幅
-  float yaw_current_max; // [raw] 电流指令限幅
+  float yaw_rate_max; // [rad/s] 角速度参考限幅
   // Pitch参考生成参数（视觉接管专用）
   float pitch_pos_kp;          // [rad/s per rad] Pitch位置误差比例系数
   float pitch_rate_max;        // [rad/s] Pitch参考角速度限幅
@@ -36,8 +31,6 @@ typedef struct {
 /* ==================== 控制器状态 ==================== */
 typedef struct {
   uint8_t inited;
-  float pos_i;  // 位置环积分项
-  float rate_i; // 速度环积分项
 } VisionYawDualLoop_s;
 
 typedef struct {

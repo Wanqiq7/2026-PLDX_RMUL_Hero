@@ -21,11 +21,7 @@
 /* ==================== 常量定义 ==================== */
 static volatile VisionCtrlParams_s vision_params = {
     .yaw_pos_kp = 6.75f, // 默认保守值，需实物调参
-    .yaw_pos_ki = 1.95f,
-    .yaw_rate_kp = 20000.0f,
-    .yaw_rate_ki = 2000.0f,
     .yaw_rate_max = 6.0f,
-    .yaw_current_max = 16384.0f,
     .pitch_pos_kp = 85.0f,        // Pitch位置误差转角速度的比例系数
     .pitch_rate_max = 4.0f,
     .pitch_err_deadband_deg = 0.0f, // Pitch小误差死区，抑制视觉抖动
