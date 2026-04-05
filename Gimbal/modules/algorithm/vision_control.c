@@ -44,8 +44,6 @@ void VisionCtrlInit(VisionCtrlState_s *state) {
     return;
   }
   state->yaw.inited = 0;
-  state->yaw.pos_i = 0.0f;
-  state->yaw.rate_i = 0.0f;
   state->pitch.inited = 0;
   state->pitch.ref_rad = 0.0f;
   state->pitch.target_rad_filtered = 0.0f;
@@ -59,8 +57,6 @@ void VisionCtrlReset(VisionCtrlState_s *state, const VisionCtrlParams_s *params,
     return;
   }
   state->yaw.inited = 0;
-  state->yaw.pos_i = 0.0f;
-  state->yaw.rate_i = 0.0f;
 
   state->pitch.inited = 0;
   state->pitch.ref_rad = ConstrainPitchRad(pitch_feedback_rad,

@@ -30,7 +30,11 @@ $visionCtrlHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\vision_control
 $visionApp = Join-Path $repoRoot 'Gimbal\application\vision\vision.c'
 $gimbalDoc = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.md'
 
-Assert-Pattern $gimbalTask 'feedforward_flag = SPEED_FEEDFORWARD' 'Yaw vision speed feedforward is still not enabled.'
+$gimbalText = Get-Content $gimbalTask -Raw
+$yawConfigPattern = 'Motor_Init_Config_s yaw_config = \{[\s\S]*?feedforward_flag = SPEED_FEEDFORWARD'
+if (-not [regex]::IsMatch($gimbalText, $yawConfigPattern)) {
+    throw 'Yaw vision speed feedforward is still not enabled.'
+}
 
 Assert-NoPattern $visionCtrlHeader 'yaw_pos_ki' 'vision_control.h still exposes dead yaw_pos_ki parameter.'
 Assert-NoPattern $visionCtrlHeader 'yaw_rate_kp' 'vision_control.h still exposes dead yaw_rate_kp parameter.'
