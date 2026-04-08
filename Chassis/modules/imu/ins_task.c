@@ -12,13 +12,19 @@
  ******************************************************************************
  */
 #include "ins_task.h"
-#include "QuaternionEKF.h"
-#include "controller.h"
+#include "BMI088driver.h"
+#include "estimation/attitude/quaternion_ekf.h"
+#include "controllers/pid/pid_controller.h"
 #include "general_def.h"
-#include "master_process.h"
 #include "bsp_pwm.h"
 #include "spi.h"  // TODO: BMI088 驱动重构后移除此依赖
-#include "user_lib.h"
+#include "utils/math/user_lib.h"
+
+enum {
+  INS_AXIS_X = 0,
+  INS_AXIS_Y = 1,
+  INS_AXIS_Z = 2,
+};
 
 static INS_t INS;
 static IMU_Param_t IMU_Param;
@@ -63,9 +69,9 @@ static void InitQuaternion(float *init_q4) {
   // 读取100次加速度计数据,取平均值作为初始值
   for (uint8_t i = 0; i < 100; ++i) {
     BMI088_Read(&BMI088);
-    acc_init[X] += BMI088.Accel[X];
-    acc_init[Y] += BMI088.Accel[Y];
-    acc_init[Z] += BMI088.Accel[Z];
+    acc_init[INS_AXIS_X] += BMI088.Accel[INS_AXIS_X];
+    acc_init[INS_AXIS_Y] += BMI088.Accel[INS_AXIS_Y];
+    acc_init[INS_AXIS_Z] += BMI088.Accel[INS_AXIS_Z];
     DWT_Delay(0.001);
   }
   for (uint8_t i = 0; i < 3; ++i)
@@ -101,9 +107,9 @@ attitude_t *INS_Init(void) {
 
   while (BMI088Init(&hspi1, 1) != BMI088_NO_ERROR)
     ;
-  IMU_Param.scale[X] = 1;
-  IMU_Param.scale[Y] = 1;
-  IMU_Param.scale[Z] = 1;
+  IMU_Param.scale[INS_AXIS_X] = 1;
+  IMU_Param.scale[INS_AXIS_Y] = 1;
+  IMU_Param.scale[INS_AXIS_Z] = 1;
   IMU_Param.Yaw = 0;
   IMU_Param.Pitch = 0;
   IMU_Param.Roll = 0;
@@ -141,23 +147,24 @@ void INS_Task(void) {
   if ((count % 1) == 0) {
     BMI088_Read(&BMI088);
 
-    INS.Accel[X] = BMI088.Accel[X];
-    INS.Accel[Y] = BMI088.Accel[Y];
-    INS.Accel[Z] = BMI088.Accel[Z];
-    INS.Gyro[X] = BMI088.Gyro[X];
-    INS.Gyro[Y] = BMI088.Gyro[Y];
-    INS.Gyro[Z] = BMI088.Gyro[Z];
+    INS.Accel[INS_AXIS_X] = BMI088.Accel[INS_AXIS_X];
+    INS.Accel[INS_AXIS_Y] = BMI088.Accel[INS_AXIS_Y];
+    INS.Accel[INS_AXIS_Z] = BMI088.Accel[INS_AXIS_Z];
+    INS.Gyro[INS_AXIS_X] = BMI088.Gyro[INS_AXIS_X];
+    INS.Gyro[INS_AXIS_Y] = BMI088.Gyro[INS_AXIS_Y];
+    INS.Gyro[INS_AXIS_Z] = BMI088.Gyro[INS_AXIS_Z];
 
     // demo function,用于修正安装误差,可以不管,本demo暂时没用
     IMU_Param_Correction(&IMU_Param, INS.Gyro, INS.Accel);
 
     // 计算重力加速度矢量和b系的XY两轴的夹角,可用作功能扩展,本demo暂时没用
-    // INS.atanxz = -atan2f(INS.Accel[X], INS.Accel[Z]) * 180 / PI;
-    // INS.atanyz = atan2f(INS.Accel[Y], INS.Accel[Z]) * 180 / PI;
+    // INS.atanxz = -atan2f(INS.Accel[INS_AXIS_X], INS.Accel[INS_AXIS_Z]) * 180 / PI;
+    // INS.atanyz = atan2f(INS.Accel[INS_AXIS_Y], INS.Accel[INS_AXIS_Z]) * 180 / PI;
 
     // 核心函数,EKF更新四元数
-    IMU_QuaternionEKF_Update(INS.Gyro[X], INS.Gyro[Y], INS.Gyro[Z],
-                             INS.Accel[X], INS.Accel[Y], INS.Accel[Z], dt);
+    IMU_QuaternionEKF_Update(INS.Gyro[INS_AXIS_X], INS.Gyro[INS_AXIS_Y],
+                             INS.Gyro[INS_AXIS_Z], INS.Accel[INS_AXIS_X],
+                             INS.Accel[INS_AXIS_Y], INS.Accel[INS_AXIS_Z], dt);
 
     memcpy(INS.q, QEKF_INS.q, sizeof(QEKF_INS.q));
 
@@ -182,8 +189,6 @@ void INS_Task(void) {
     INS.Pitch = QEKF_INS.Pitch;
     INS.Roll = QEKF_INS.Roll;
     INS.YawTotalAngle = QEKF_INS.YawTotalAngle;
-
-    VisionSetAltitude(INS.Yaw, INS.Pitch, INS.Roll);
   }
 
   // temperature control
@@ -278,17 +283,29 @@ static void IMU_Param_Correction(IMU_Param_t *param, float gyro[3],
   for (uint8_t i = 0; i < 3; ++i)
     gyro_temp[i] = gyro[i] * param->scale[i];
 
-  gyro[X] = c_11 * gyro_temp[X] + c_12 * gyro_temp[Y] + c_13 * gyro_temp[Z];
-  gyro[Y] = c_21 * gyro_temp[X] + c_22 * gyro_temp[Y] + c_23 * gyro_temp[Z];
-  gyro[Z] = c_31 * gyro_temp[X] + c_32 * gyro_temp[Y] + c_33 * gyro_temp[Z];
+  gyro[INS_AXIS_X] = c_11 * gyro_temp[INS_AXIS_X] +
+                     c_12 * gyro_temp[INS_AXIS_Y] +
+                     c_13 * gyro_temp[INS_AXIS_Z];
+  gyro[INS_AXIS_Y] = c_21 * gyro_temp[INS_AXIS_X] +
+                     c_22 * gyro_temp[INS_AXIS_Y] +
+                     c_23 * gyro_temp[INS_AXIS_Z];
+  gyro[INS_AXIS_Z] = c_31 * gyro_temp[INS_AXIS_X] +
+                     c_32 * gyro_temp[INS_AXIS_Y] +
+                     c_33 * gyro_temp[INS_AXIS_Z];
 
   float accel_temp[3];
   for (uint8_t i = 0; i < 3; ++i)
     accel_temp[i] = accel[i];
 
-  accel[X] = c_11 * accel_temp[X] + c_12 * accel_temp[Y] + c_13 * accel_temp[Z];
-  accel[Y] = c_21 * accel_temp[X] + c_22 * accel_temp[Y] + c_23 * accel_temp[Z];
-  accel[Z] = c_31 * accel_temp[X] + c_32 * accel_temp[Y] + c_33 * accel_temp[Z];
+  accel[INS_AXIS_X] = c_11 * accel_temp[INS_AXIS_X] +
+                      c_12 * accel_temp[INS_AXIS_Y] +
+                      c_13 * accel_temp[INS_AXIS_Z];
+  accel[INS_AXIS_Y] = c_21 * accel_temp[INS_AXIS_X] +
+                      c_22 * accel_temp[INS_AXIS_Y] +
+                      c_23 * accel_temp[INS_AXIS_Z];
+  accel[INS_AXIS_Z] = c_31 * accel_temp[INS_AXIS_X] +
+                      c_32 * accel_temp[INS_AXIS_Y] +
+                      c_33 * accel_temp[INS_AXIS_Z];
 
   lastYawOffset = param->Yaw;
   lastPitchOffset = param->Pitch;

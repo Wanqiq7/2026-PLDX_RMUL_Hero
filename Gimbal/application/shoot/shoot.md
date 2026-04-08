@@ -9,3 +9,33 @@
 5. 根据发来的弹速数据，设定摩擦轮的参考值(未做)
 6. 根据发来的弹舱数据进行开合
 7. 设定反馈数据，推送到shoot_feed话题
+
+## 当前动力主线
+
+`shoot` 当前常规动力执行器链路已经统一为：
+
+```text
+摩擦轮目标速度 / 拨盘目标角度 / 拨盘目标速度
+-> shoot_effort_controller
+-> DJIMotorCalculateEffort()
+-> Controller_Effort_Output(TAU_REF)
+-> DJIMotorSetEffort()
+```
+
+其中：
+
+1. 摩擦轮常规路径走 `ShootFrictionCalculateEffort()`
+2. 拨盘单发/三发/卡弹恢复走 `ShootLoaderCalculateAngleEffort()`
+3. 拨盘连发/反转走 `ShootLoaderCalculateSpeedEffort()`
+
+## 接口边界
+
+当前 `shoot` 常规主线中不再使用：
+
+- `DJIMotorSetRef()`
+
+保留给特殊用途的接口只有：
+
+- `DJIMotorStop()`：安全停机
+
+因此这次迁移的重点是“统一执行语义为 TAU_REF”，而不是改变拨盘状态机本身。

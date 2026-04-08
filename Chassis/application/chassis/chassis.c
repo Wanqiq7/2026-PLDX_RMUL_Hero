@@ -1,12 +1,12 @@
 #include "chassis.h"
 #include "chassis_can_link.h"
 #include "VOFA.h"
-#include "arm_math_compat.h"
+#include "utils/math/arm_math_compat.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
 #include "bsp_usart.h"
-#include "chassis_force_control.h"
-#include "controller.h"
+#include "controllers/domain/chassis_force_control.h"
+#include "controllers/pid/pid_controller.h"
 #include "dji_motor.h"
 #include "general_def.h"
 #include "main.h"
@@ -19,7 +19,7 @@
 #include "string.h"
 #include "super_cap.h"
 #include "sysid_task.h"
-#include "user_lib.h"
+#include "utils/math/user_lib.h"
 
 /* ============================================================
  * 系统辨识控制开关（测试时改为1，完成后改为0）
@@ -118,10 +118,6 @@ static const Chassis_Runtime_Config_t chassis_config = {
 #include "ins_task.h"
 attitude_t *Chassis_IMU_data;
 #endif // CHASSIS_BOARD
-#ifdef ONE_BOARD
-static Publisher_t *chassis_pub;                     // 用于发布底盘的数据
-static Subscriber_t *chassis_sub;                    // 用于订阅底盘的控制命令
-#endif                                               // !ONE_BOARD
 static Chassis_Ctrl_Cmd_s chassis_cmd_recv;          // 底盘接收到的控制命令
 static Chassis_Upload_Data_s chassis_feedback_data;  // 底盘回传的反馈数据
 
@@ -173,23 +169,48 @@ static PIDInstance chassis_follow_pid; // 底盘跟随云台PID控制器
 static uint32_t chassis_last_telemetry_ms = 0;
 static const uint32_t CHASSIS_TELEMETRY_PERIOD_MS = 500U;
 
-static float LegacyPowerBridgeTauToRawCurrentCmd(float tau_ref_nm) {
-  return tau_ref_nm / M3508_TORQUE_CONSTANT / M3508_CMD_TO_CURRENT_COEFF;
-}
-
-static float LegacyPowerBridgeRawCurrentCmdToTau(float raw_current_cmd) {
-  return raw_current_cmd * M3508_CMD_TO_CURRENT_COEFF *
-         M3508_TORQUE_CONSTANT;
-}
-
-static void LegacyPowerBridgeSetMotorTauRef(DJIMotorInstance *motor,
-                                            float tau_ref_nm) {
+static void ApplyMotorTauRef(DJIMotorInstance *motor, float tau_ref_nm) {
   Controller_Effort_Output_s effort = {
       .semantic = CONTROLLER_OUTPUT_TAU_REF,
       .tau_ref_nm = tau_ref_nm,
   };
   DJIMotorSetEffort(motor, &effort);
 }
+
+static void ApplyWheelTauRef(const float wheel_tau_ref[4]) {
+  if (wheel_tau_ref == NULL) {
+    return;
+  }
+
+  ApplyMotorTauRef(motor_rf, wheel_tau_ref[0]); // RF
+  ApplyMotorTauRef(motor_lf, wheel_tau_ref[1]); // LF
+  ApplyMotorTauRef(motor_lb, wheel_tau_ref[2]); // LB
+  ApplyMotorTauRef(motor_rb, wheel_tau_ref[3]); // RB
+}
+
+#if POWER_CONTROLLER_ENABLE
+static void BuildPowerWheelObjs(const float wheel_tau_ref[4],
+                                const float motor_speeds[4],
+                                const float target_wheel_omega[4],
+                                const float motor_torques[4],
+                                PowerWheelObj_t wheel_objs[4]) {
+  if (wheel_tau_ref == NULL || motor_speeds == NULL ||
+      target_wheel_omega == NULL || motor_torques == NULL ||
+      wheel_objs == NULL) {
+    return;
+  }
+
+  for (size_t i = 0; i < 4; ++i) {
+    wheel_objs[i].requested_tau_nm = wheel_tau_ref[i];
+    wheel_objs[i].feedback_speed_rad_s = motor_speeds[i];
+    wheel_objs[i].target_speed_rad_s =
+        target_wheel_omega[i] / REDUCTION_RATIO_WHEEL;
+    wheel_objs[i].feedback_tau_nm = motor_torques[i];
+    wheel_objs[i].max_tau_nm = MAX_WHEEL_CURRENT * M3508_TORQUE_CONSTANT;
+    wheel_objs[i].online = 1U;
+  }
+}
+#endif
 
 static void SyncGeneratedUIState(uint8_t comm_online, uint8_t cap_online,
                                  uint16_t cap_energy) {
@@ -407,12 +428,6 @@ void ChassisInit() {
   power_ctrl = PowerControllerRegister(&power_config);
 #endif // POWER_CONTROLLER_ENABLE
 
-#ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息
-  chassis_sub = RegisterSubscriber("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-  chassis_pub =
-      RegisterPublisher("chassis_feed", sizeof(Chassis_Upload_Data_s));
-#endif // ONE_BOARD
-
   // 底盘跟随云台PID控制器初始化（统一力控：输出角速度）
   // 注意：输出单位为角速度（rad/s），后续通过力控PID转换为扭矩
   PID_Init_Config_s follow_pid_config = {
@@ -541,12 +556,7 @@ void ChassisTask() {
     }
   }
 
-  // 后续增加没收到消息的处理(双板的情况)
-  // 获取新的控制信息
-#ifdef ONE_BOARD
-  SubGetMessage(chassis_sub, &chassis_cmd_recv);
-#endif
-#ifdef CHASSIS_BOARD
+  // 双板控制链路只接受来自云台板的 CAN 指令
   comm_online = ChassisCanLinkUpdateCommand(&chassis_cmd_recv);
   if (!comm_online) {
     // 双板链路失联：强制零力并清零速度，禁止沿用旧指令
@@ -559,7 +569,6 @@ void ChassisTask() {
     chassis_cmd_recv.ui_friction_on = 0U;
     chassis_cmd_recv.ui_autoaim_enabled = 0U;
   }
-#endif // CHASSIS_BOARD
 
   // === 应用遥控器速度增益 ===
   // 从Gimbal接收到的vx/vy是归一化值(-1.0~1.0)
@@ -575,10 +584,10 @@ void ChassisTask() {
     DJIMotorStop(motor_rf);
     DJIMotorStop(motor_lb);
     DJIMotorStop(motor_rb);
-    LegacyPowerBridgeSetMotorTauRef(motor_lf, 0.0f);
-    LegacyPowerBridgeSetMotorTauRef(motor_rf, 0.0f);
-    LegacyPowerBridgeSetMotorTauRef(motor_lb, 0.0f);
-    LegacyPowerBridgeSetMotorTauRef(motor_rb, 0.0f);
+    ApplyMotorTauRef(motor_lf, 0.0f);
+    ApplyMotorTauRef(motor_rf, 0.0f);
+    ApplyMotorTauRef(motor_lb, 0.0f);
+    ApplyMotorTauRef(motor_rb, 0.0f);
     ResetFollowPidRuntimeState();
     ChassisForceControlReset();
     goto feedback_only;
@@ -749,42 +758,17 @@ void ChassisTask() {
   //   - target_wheel_omega 是目标转子角速度(rad/s)，需转换为输出轴
   //   - motor_speeds 是当前输出轴角速度(rad/s)
   //   - 功率控制器需要统一量纲，都基于输出轴侧
-  PowerMotorObj_t motor_objs[4] = {
-      {.pid_output = LegacyPowerBridgeTauToRawCurrentCmd(wheel_tau_ref[0]),
-       .current_av = motor_speeds[0],
-       .target_av = target_wheel_omega[0] / REDUCTION_RATIO_WHEEL,
-       .pid_max_output = 16384.0f},
-      {.pid_output = LegacyPowerBridgeTauToRawCurrentCmd(wheel_tau_ref[1]),
-       .current_av = motor_speeds[1],
-       .target_av = target_wheel_omega[1] / REDUCTION_RATIO_WHEEL,
-       .pid_max_output = 16384.0f},
-      {.pid_output = LegacyPowerBridgeTauToRawCurrentCmd(wheel_tau_ref[2]),
-       .current_av = motor_speeds[2],
-       .target_av = target_wheel_omega[2] / REDUCTION_RATIO_WHEEL,
-       .pid_max_output = 16384.0f},
-      {.pid_output = LegacyPowerBridgeTauToRawCurrentCmd(wheel_tau_ref[3]),
-       .current_av = motor_speeds[3],
-       .target_av = target_wheel_omega[3] / REDUCTION_RATIO_WHEEL,
-       .pid_max_output = 16384.0f},
-  };
-  float limited_output[4];
-  PowerGetLimitedOutput(power_ctrl, motor_objs, limited_output);
+  PowerWheelObj_t wheel_objs[4] = {0};
+  float limited_wheel_tau_ref[4] = {0};
+  BuildPowerWheelObjs(wheel_tau_ref, motor_speeds, target_wheel_omega,
+                      motor_torques, wheel_objs);
+  PowerGetLimitedWheelTauRef(power_ctrl, wheel_objs, limited_wheel_tau_ref);
 
-  // 5. 将限幅结果转回 tau_ref 后再交给电机模块，保持扭矩主线一致
-  LegacyPowerBridgeSetMotorTauRef(
-      motor_rf, LegacyPowerBridgeRawCurrentCmdToTau(limited_output[0])); // RF
-  LegacyPowerBridgeSetMotorTauRef(
-      motor_lf, LegacyPowerBridgeRawCurrentCmdToTau(limited_output[1])); // LF
-  LegacyPowerBridgeSetMotorTauRef(
-      motor_lb, LegacyPowerBridgeRawCurrentCmdToTau(limited_output[2])); // LB
-  LegacyPowerBridgeSetMotorTauRef(
-      motor_rb, LegacyPowerBridgeRawCurrentCmdToTau(limited_output[3])); // RB
+  // 5. 原生 tau 域限幅后，直接交给 DJI 电机 effort 主线
+  ApplyWheelTauRef(limited_wheel_tau_ref);
 #else
   // 5. 无功率限制时直接保持 tau_ref 主线，将 effort 交给 DJI motor adapter
-  LegacyPowerBridgeSetMotorTauRef(motor_rf, wheel_tau_ref[0]); // RF
-  LegacyPowerBridgeSetMotorTauRef(motor_lf, wheel_tau_ref[1]); // LF
-  LegacyPowerBridgeSetMotorTauRef(motor_lb, wheel_tau_ref[2]); // LB
-  LegacyPowerBridgeSetMotorTauRef(motor_rb, wheel_tau_ref[3]); // RB
+  ApplyWheelTauRef(wheel_tau_ref);
 #endif
 
   // 5. 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
@@ -838,10 +822,5 @@ feedback_only:
   }
 
   // 推送反馈消息
-#ifdef ONE_BOARD
-  PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
-#endif
-#ifdef CHASSIS_BOARD
   ChassisCanLinkSendFeedbackIfDue(&chassis_feedback_data);
-#endif // CHASSIS_BOARD
 }

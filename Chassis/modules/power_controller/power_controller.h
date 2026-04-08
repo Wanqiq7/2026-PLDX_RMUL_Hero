@@ -12,7 +12,6 @@
 #ifndef POWER_CONTROLLER_H
 #define POWER_CONTROLLER_H
 
-#include "controller.h"
 #include "stdint.h"
 
 /* ======================== 配置宏定义 ======================== */
@@ -80,7 +79,21 @@ typedef enum {
 } PowerErrorFlags_e;
 
 /**
- * @brief 单个电机的功率对象
+ * @brief 原生轮端功率对象
+ * @note Phase 4 起推荐外部主线使用该结构，语义保持在轮端 tau 域
+ */
+typedef struct {
+  float requested_tau_nm;      // 请求的轮端扭矩参考 (Nm)
+  float feedback_speed_rad_s;  // 当前轮端角速度 (rad/s)
+  float target_speed_rad_s;    // 目标轮端角速度 (rad/s)
+  float feedback_tau_nm;       // 当前轮端反馈扭矩 (Nm)
+  float max_tau_nm;            // 当前轮端最大允许扭矩 (Nm)
+  uint8_t online;              // 当前轮是否在线
+} PowerWheelObj_t;
+
+/**
+ * @brief 单个电机的旧域功率对象
+ * @note 仅用于 Phase 4 迁移过渡，避免一次性打断现有样本与兼容入口
  */
 typedef struct {
   float pid_output;     // PID输出（CAN指令值）
@@ -160,11 +173,21 @@ PowerControllerRegister(const PowerControllerConfig_t *config);
 void PowerControllerTask(PowerControllerInstance *instance);
 
 /**
+ * @brief 获取功率限制后的轮端扭矩参考
+ * @param instance 功率控制器实例
+ * @param wheel_objs 四个轮端对象数组
+ * @param limited_wheel_tau_ref 输出数组（轮端 tau_ref）
+ */
+void PowerGetLimitedWheelTauRef(PowerControllerInstance *instance,
+                                const PowerWheelObj_t wheel_objs[4],
+                                float limited_wheel_tau_ref[4]);
+
+/**
  * @brief 获取功率限制后的电机输出
  * @param instance 功率控制器实例
  * @param motor_objs 四个电机的功率对象数组
  * @param output 输出数组（由调用者提供空间）
- * @note 在底盘控制任务中调用，实时性要求高
+ * @note 旧域兼容接口，内部会桥接到原生轮端 tau 域
  */
 void PowerGetLimitedOutput(PowerControllerInstance *instance,
                            PowerMotorObj_t motor_objs[4], float output[4]);

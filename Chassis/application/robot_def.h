@@ -13,14 +13,11 @@
 #define ROBOT_DEF_H
 
 #include "ins_task.h"
-#include "master_process.h"
 #include "math.h"
 #include "stdint.h"
 
-// 开发板类型定义，编译时只保留一个
-// #define ONE_BOARD // 单板控制整车
+// 开发板角色固定为底盘板，当前工作树不再保留单板/云台板兼容入口
 #define CHASSIS_BOARD // 底盘板
-// #define GIMBAL_BOARD // 云台板
 
 // 视觉通信默认走虚拟串口
 #define VISION_USE_VCP
@@ -164,9 +161,7 @@ typedef struct {
   1
 
 
-#if (defined(ONE_BOARD) && defined(CHASSIS_BOARD)) ||                          \
-    (defined(ONE_BOARD) && defined(GIMBAL_BOARD)) ||                           \
-    (defined(CHASSIS_BOARD) && defined(GIMBAL_BOARD))
+#if defined(CHASSIS_BOARD) && defined(GIMBAL_BOARD)
 #error Conflict board definition! You can only define one board type.
 #endif
 
@@ -226,6 +221,15 @@ typedef enum {
   LOAD_3_BULLET,  // 三发
   LOAD_BURSTFIRE, // 连发
 } loader_mode_e;
+
+typedef enum {
+  BULLET_SPEED_NONE = 0,
+  BIG_AMU_10 = 10,
+  SMALL_AMU_15 = 15,
+  BIG_AMU_16 = 16,
+  SMALL_AMU_18 = 18,
+  SMALL_AMU_30 = 30,
+} Bullet_Speed_e;
 
 
 typedef struct { // 功率控制
@@ -350,12 +354,47 @@ _Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= 60,
                "Chassis_Ctrl_Cmd_s too large for CAN comm");
 _Static_assert(sizeof(Chassis_Upload_Data_s) <= 60,
                "Chassis_Upload_Data_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_Fast_Pkt_s) <= 60,
+               "Chassis_Ctrl_Fast_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_State_Pkt_s) <= 60,
+               "Chassis_Ctrl_State_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_UI_Pkt_s) <= 60,
+               "Chassis_Ctrl_UI_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_Event_Pkt_s) <= 60,
+               "Chassis_Ctrl_Event_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Feed_Fast_Pkt_s) <= 60,
+               "Chassis_Feed_Fast_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Feed_State_Pkt_s) <= 60,
+               "Chassis_Feed_State_Pkt_s too large for CAN comm");
 #else
 typedef char
     chassis_ctrl_cmd_size_check[(sizeof(Chassis_Ctrl_Cmd_s) <= 60) ? 1 : -1];
 typedef char
     chassis_upload_data_size_check[(sizeof(Chassis_Upload_Data_s) <= 60) ? 1
                                                                          : -1];
+typedef char
+    chassis_ctrl_fast_pkt_size_check[(sizeof(Chassis_Ctrl_Fast_Pkt_s) <= 60)
+                                         ? 1
+                                         : -1];
+typedef char
+    chassis_ctrl_state_pkt_size_check[(sizeof(Chassis_Ctrl_State_Pkt_s) <= 60)
+                                          ? 1
+                                          : -1];
+typedef char
+    chassis_ctrl_ui_pkt_size_check[(sizeof(Chassis_Ctrl_UI_Pkt_s) <= 60) ? 1
+                                                                          : -1];
+typedef char
+    chassis_ctrl_event_pkt_size_check[(sizeof(Chassis_Ctrl_Event_Pkt_s) <= 60)
+                                          ? 1
+                                          : -1];
+typedef char
+    chassis_feed_fast_pkt_size_check[(sizeof(Chassis_Feed_Fast_Pkt_s) <= 60)
+                                         ? 1
+                                         : -1];
+typedef char
+    chassis_feed_state_pkt_size_check[(sizeof(Chassis_Feed_State_Pkt_s) <= 60)
+                                          ? 1
+                                          : -1];
 #endif
 
 typedef struct {

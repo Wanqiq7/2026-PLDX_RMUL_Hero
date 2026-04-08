@@ -5,8 +5,9 @@
  */
 
 #include "power_controller.h"
-#include "arm_math_compat.h"
-#include "user_lib.h"
+#include "estimation/identification/rls_estimator.h"
+#include "utils/math/arm_math_compat.h"
+#include "utils/math/user_lib.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -431,9 +432,10 @@ void PowerControllerTask(PowerControllerInstance *instance) {
   UpdatePowerStatistics(instance);
 }
 
-void PowerGetLimitedOutput(PowerControllerInstance *instance,
-                           PowerMotorObj_t motor_objs[4], float output[4]) {
-  if (instance == NULL)
+void PowerGetLimitedWheelTauRef(PowerControllerInstance *instance,
+                                const PowerWheelObj_t wheel_objs[4],
+                                float limited_wheel_tau_ref[4]) {
+  if (instance == NULL || wheel_objs == NULL || limited_wheel_tau_ref == NULL)
     return;
 
   float max_power = instance->limit.max_power;
@@ -444,15 +446,15 @@ void PowerGetLimitedOutput(PowerControllerInstance *instance,
   float sum_positive_power = 0.0f;
 
   for (int i = 0; i < 4; i++) {
-    if (instance->motor.disconnect_cnt[i] >= MOTOR_DISCONNECT_TIMEOUT) {
+    if (!wheel_objs[i].online ||
+        instance->motor.disconnect_cnt[i] >= MOTOR_DISCONNECT_TIMEOUT) {
       cmd_power[i] = 0.0f;
-      output[i] = 0.0f;
+      limited_wheel_tau_ref[i] = 0.0f;
       continue;
     }
 
-    float torque = motor_objs[i].pid_output * instance->config.current_scale *
-                   instance->config.torque_constant;
-    float speed = motor_objs[i].current_av;
+    float torque = wheel_objs[i].requested_tau_nm;
+    float speed = wheel_objs[i].feedback_speed_rad_s;
 
     cmd_power[i] = PredictPower(instance, torque, speed);
     sum_cmd_power += cmd_power[i];
@@ -469,7 +471,7 @@ void PowerGetLimitedOutput(PowerControllerInstance *instance,
   // 2. 功率不超限，直接输出
   if (sum_positive_power <= max_power) {
     for (int i = 0; i < 4; i++) {
-      output[i] = motor_objs[i].pid_output;
+      limited_wheel_tau_ref[i] = wheel_objs[i].requested_tau_nm;
     }
     return;
   }
@@ -479,7 +481,8 @@ void PowerGetLimitedOutput(PowerControllerInstance *instance,
   float sum_error = 0.0f;
 
   for (int i = 0; i < 4; i++) {
-    speed_error[i] = fabsf(motor_objs[i].target_av - motor_objs[i].current_av);
+    speed_error[i] = fabsf(wheel_objs[i].target_speed_rad_s -
+                           wheel_objs[i].feedback_speed_rad_s);
     sum_error += speed_error[i];
   }
 
@@ -494,7 +497,7 @@ void PowerGetLimitedOutput(PowerControllerInstance *instance,
 
   for (int i = 0; i < 4; i++) {
     if (cmd_power[i] <= 0.0f) {
-      output[i] = motor_objs[i].pid_output;
+      limited_wheel_tau_ref[i] = wheel_objs[i].requested_tau_nm;
       continue;
     }
 
@@ -508,20 +511,52 @@ void PowerGetLimitedOutput(PowerControllerInstance *instance,
 
     float power_allocated = weight * max_power;
 
-    float current_torque = motor_objs[i].pid_output *
-                           instance->config.current_scale *
-                           instance->config.torque_constant;
+    float current_torque = wheel_objs[i].requested_tau_nm;
 
-    float max_torque = SolveMaxTorque(instance, motor_objs[i].current_av,
+    float max_torque = SolveMaxTorque(instance, wheel_objs[i].feedback_speed_rad_s,
                                       power_allocated, current_torque);
 
     if (fabsf(current_torque) > 1e-6f) {
       float torque_scale = max_torque / current_torque;
       torque_scale = float_constrain(torque_scale, 0.0f, 1.0f);
-      output[i] = motor_objs[i].pid_output * torque_scale;
+      limited_wheel_tau_ref[i] = wheel_objs[i].requested_tau_nm * torque_scale;
     } else {
-      output[i] = motor_objs[i].pid_output;
+      limited_wheel_tau_ref[i] = wheel_objs[i].requested_tau_nm;
     }
+  }
+}
+
+void PowerGetLimitedOutput(PowerControllerInstance *instance,
+                           PowerMotorObj_t motor_objs[4], float output[4]) {
+  if (instance == NULL || motor_objs == NULL || output == NULL)
+    return;
+
+  PowerWheelObj_t wheel_objs[4] = {0};
+  float limited_wheel_tau_ref[4] = {0};
+  const float raw_to_tau =
+      instance->config.current_scale * instance->config.torque_constant;
+
+  for (int i = 0; i < 4; i++) {
+    wheel_objs[i].requested_tau_nm = motor_objs[i].pid_output * raw_to_tau;
+    wheel_objs[i].feedback_speed_rad_s = motor_objs[i].current_av;
+    wheel_objs[i].target_speed_rad_s = motor_objs[i].target_av;
+    wheel_objs[i].feedback_tau_nm = motor_objs[i].pid_output * raw_to_tau;
+    wheel_objs[i].max_tau_nm = motor_objs[i].pid_max_output * raw_to_tau;
+    wheel_objs[i].online =
+        (instance->motor.disconnect_cnt[i] < MOTOR_DISCONNECT_TIMEOUT);
+  }
+
+  PowerGetLimitedWheelTauRef(instance, wheel_objs, limited_wheel_tau_ref);
+
+  if (fabsf(raw_to_tau) <= 1e-6f) {
+    for (int i = 0; i < 4; i++) {
+      output[i] = 0.0f;
+    }
+    return;
+  }
+
+  for (int i = 0; i < 4; i++) {
+    output[i] = limited_wheel_tau_ref[i] / raw_to_tau;
   }
 }
 

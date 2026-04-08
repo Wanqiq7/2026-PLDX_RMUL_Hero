@@ -1,0 +1,62 @@
+{
+  "contract_version": "phase3-golden-v1",
+  "module": "power_controller",
+  "focus": "PredictPower",
+  "harness": "tests/harnesses/power_controller_sample_harness.c",
+  "samples": [
+    {
+      "sample_id": "predict-zero-idle-01",
+      "purpose": "冻结零速零矩时仅保留每轮静态损耗分摊项的行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": { "torque_nm": 0.0, "speed_rad_s": 0.0 },
+      "expected_output": { "predicted_power_w": 1.275 },
+      "tolerance": { "predicted_power_w": 0.001 },
+      "notes": "对应 k3 / 4 分摊分支。"
+    },
+    {
+      "sample_id": "predict-forward-drive-01",
+      "purpose": "冻结正转正矩驱动工况的功率预测值。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": { "torque_nm": 1.8, "speed_rad_s": 28.0 },
+      "expected_output": { "predicted_power_w": 61.723 },
+      "tolerance": { "predicted_power_w": 0.001 },
+      "notes": "覆盖常规推进工况。"
+    },
+    {
+      "sample_id": "predict-reverse-drive-01",
+      "purpose": "冻结负转负矩时的对称驱动行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": { "torque_nm": -1.5, "speed_rad_s": -30.0 },
+      "expected_output": { "predicted_power_w": 55.575 },
+      "tolerance": { "predicted_power_w": 0.001 },
+      "notes": "验证扭矩速度同号时的机械功正功率。"
+    },
+    {
+      "sample_id": "predict-regen-brake-01",
+      "purpose": "冻结正转负矩回馈/制动场景的负功率预测。",
+      "source": { "kind": "synthetic-boundary", "detail": "explicit regen boundary sample" },
+      "input": { "torque_nm": -1.2, "speed_rad_s": 20.0 },
+      "expected_output": { "predicted_power_w": -16.597 },
+      "tolerance": { "predicted_power_w": 0.001 },
+      "notes": "为限功率负功率补偿分支提供基线。"
+    },
+    {
+      "sample_id": "predict-high-speed-low-torque-01",
+      "purpose": "冻结高速低矩样本中 |ω| 项的影响。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": { "torque_nm": 0.4, "speed_rad_s": 60.0 },
+      "expected_output": { "predicted_power_w": 38.667 },
+      "tolerance": { "predicted_power_w": 0.001 },
+      "notes": "用于后续 RLS 高频低矩轨迹对照。"
+    },
+    {
+      "sample_id": "predict-low-speed-high-torque-01",
+      "purpose": "冻结低速高矩样本中 τ² 项的影响。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": { "torque_nm": 3.0, "speed_rad_s": 5.0 },
+      "expected_output": { "predicted_power_w": 28.175 },
+      "tolerance": { "predicted_power_w": 0.001 },
+      "notes": "验证力矩损耗项在低速扭矩区间的占比。"
+    }
+  ]
+}

@@ -5,11 +5,11 @@
 #include "bmi088.h"
 #include "dji_motor.h"
 #include "general_def.h"
-#include "heat_gate_model.h"
+#include "controllers/models/heat_gate_model.h"
 #include "ins_task.h"
 #include "message_center.h"
 #include "remote_control.h"
-#include "user_lib.h"
+#include "utils/math/user_lib.h"
 #include "vision_comm.h"
 #include "vtm_input/vtm_input.h"
 
@@ -17,7 +17,7 @@
 #include "bsp_dwt.h"
 #include "bsp_log.h"
 
-#include "arm_math_compat.h"
+#include "utils/math/arm_math_compat.h"
 #include "main.h"
 #include <math.h>
 #include <string.h>
@@ -71,10 +71,6 @@ static CANCommInstance *cmd_can_state_comm;
 static CANCommInstance *cmd_can_ui_comm;
 static CANCommInstance *cmd_can_event_comm;
 #endif
-#ifdef ONE_BOARD
-static Publisher_t *chassis_cmd_pub;   // 底盘控制消息发布者
-static Subscriber_t *chassis_feed_sub; // 底盘反馈信息订阅者
-#endif                                 // ONE_BOARD
 
 static Chassis_Ctrl_Cmd_s
     chassis_cmd_send; // 发送给底盘应用的信息,包括控制信息和UI绘制相关
@@ -834,12 +830,6 @@ void RobotCMDInit() {
   shoot_feed_sub =
       RegisterSubscriber("shoot_feed", sizeof(Shoot_Upload_Data_s));
 
-#ifdef ONE_BOARD // 双板兼容
-  chassis_cmd_pub =
-      RegisterPublisher("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-  chassis_feed_sub =
-      RegisterSubscriber("chassis_feed", sizeof(Chassis_Upload_Data_s));
-#endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
   CANComm_Init_Config_s fast_comm_conf = {
       .can_config =
@@ -1432,13 +1422,8 @@ void RobotCMDTask() {
   VTMInputProcess();
 
   // BMI088Acquire(bmi088_test,&bmi088_data) ;
-  // 从其他应用获取回传数据
-#ifdef ONE_BOARD
-  SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);
-#endif // ONE_BOARD
-#ifdef GIMBAL_BOARD
+  // 底盘状态只通过跨板 CAN 摘要链路回传
   UpdateChassisFetchDataFromCan();
-#endif // GIMBAL_BOARD
   SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
   SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
   SubGetMessage(vision_data_sub, &vision_data_recv); // 获取视觉处理数据
@@ -1450,13 +1435,7 @@ void RobotCMDTask() {
   // 最高优先级：先同步安全状态，再决定是否继续执行控制逻辑
   EmergencyHandler();
   if (robot_state != ROBOT_READY) {
-
-#ifdef ONE_BOARD
-    PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
-#endif // ONE_BOARD
-#ifdef GIMBAL_BOARD
     SendChassisCommandCanIfDue();
-#endif // GIMBAL_BOARD
     PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
     PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
     PubPushMessage(vision_cmd_pub, (void *)&vision_cmd_send);
@@ -1483,12 +1462,7 @@ void RobotCMDTask() {
 
   // 推送消息,双板通信,视觉通信等
   // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
-#ifdef ONE_BOARD
-  PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
-#endif // ONE_BOARD
-#ifdef GIMBAL_BOARD
   SendChassisCommandCanIfDue();
-#endif // GIMBAL_BOARD
   PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
   PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
   PubPushMessage(vision_cmd_pub, (void *)&vision_cmd_send); // 发布视觉控制指令

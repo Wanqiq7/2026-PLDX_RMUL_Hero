@@ -16,7 +16,7 @@
 #include "message_center.h"
 #include "robot_def.h"
 #include "vision_comm.h"
-#include "vision_control.h"
+#include "controllers/domain/vision_control.h"
 
 /* ==================== 常量定义 ==================== */
 static volatile VisionCtrlParams_s vision_params = {

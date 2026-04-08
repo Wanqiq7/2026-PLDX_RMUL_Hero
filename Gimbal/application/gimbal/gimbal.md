@@ -24,7 +24,7 @@
 当前 `GIMBAL_GYRO_MODE` 与 `GIMBAL_AUTOAIM_MODE` 下，Yaw 轴统一采用闭环扭矩主链路：
 
 ```text
-yaw_ref / yaw_rate_ff
+yaw_ref / yaw_rate_ff (rate feedforward)
 -> DJIMotorCalculateEffort()
 -> Controller_Effort_Output(TAU_REF)
 -> DJIMotorSetEffort()
@@ -53,12 +53,40 @@ Pitch_ref / Pitch_feedback / Gyro_feedback
 
 ```text
 参考值
--> modules/motor 内部 CalculateEffort
+-> gimbal_ref_manager
+-> modules/motor 内部 Controller / CalculateEffort
 -> SetEffort
 -> adapter / protocol
 ```
 
 自瞄接管后的常规链路也统一走 `SetEffort` 主线，不再保留原始电流旁路作为默认方案。
+
+其中三层边界应按下面理解：
+
+1. `gimbal_ref_manager`
+   - 只负责参考仲裁、接管边沿处理、Pitch 限位与前馈透传
+   - 不负责控制器选择、不负责执行量计算
+2. `modules/motor` 内的 Controller / CalculateEffort
+   - 负责把参考值和反馈转换为统一 `Controller_Effort_Output(TAU_REF)`
+   - 不负责业务状态机
+3. `adapter / protocol`
+   - 负责把统一努力量翻译为 raw current / MIT torque / 报文发送
+   - 不负责参考仲裁或业务模式判断
+
+因此 `gimbal_ref_manager` 负责：
+
+1. 手操参考与视觉参考选择
+2. 视觉速度前馈透传
+3. Pitch 参考限位
+4. 接管状态输出
+
+因此 `gimbal.c` 当前的职责已经收缩为：
+
+1. 模式编排
+2. 组织 `Gimbal_Ref_Input_s`
+3. 调用参考仲裁层
+4. 调用 `CalculateEffort -> SetEffort`
+4. 发布反馈
 
 ### LQR 模式
 

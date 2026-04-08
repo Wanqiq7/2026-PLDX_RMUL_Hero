@@ -13,8 +13,9 @@
 #define MOTOR_DEF_H
 
 #include "bsp_can.h"
-#include "SMC_Controller.h"
-#include "controller.h"
+#include "controllers/smc/smc_controller.h"
+#include "controllers/pid/pid_controller.h"
+#include "controllers/lqr/lqr_controller.h"
 #include "stdint.h"
 
 #define LIMIT_MIN_MAX(x, min, max)                                             \

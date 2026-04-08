@@ -15,13 +15,7 @@
 #ifndef __INS_TASK_H
 #define __INS_TASK_H
 
-#include "BMI088driver.h"
-#include "QuaternionEKF.h"
 #include "stdint.h"
-
-#define X 0
-#define Y 1
-#define Z 2
 
 #define INS_TASK_PERIOD 1
 

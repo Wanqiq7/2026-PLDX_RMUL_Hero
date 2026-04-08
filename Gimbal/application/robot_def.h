@@ -17,10 +17,8 @@
 #include "stdint.h"
 #include "vision_comm.h"
 
-// 开发板类型定义，编译时只保留一个
-// #define ONE_BOARD // 单板控制整车
-// #define CHASSIS_BOARD // 底盘板
-#define GIMBAL_BOARD   // 云台板
+// 开发板角色固定为云台板，当前工作树不再保留单板/底盘板兼容入口
+#define GIMBAL_BOARD // 云台板
 
 /* -------------------------视觉通信链路选择-------------------------
  */
@@ -119,9 +117,7 @@
   1
 
 
-#if (defined(ONE_BOARD) && defined(CHASSIS_BOARD)) ||                          \
-    (defined(ONE_BOARD) && defined(GIMBAL_BOARD)) ||                           \
-    (defined(CHASSIS_BOARD) && defined(GIMBAL_BOARD))
+#if defined(CHASSIS_BOARD) && defined(GIMBAL_BOARD)
 #error Conflict board definition! You can only define one board type.
 #endif
 
@@ -366,8 +362,8 @@ typedef struct {
   uint8_t vision_takeover; // 视觉接管标志
   float yaw_ref_rad;         // 视觉建议的Yaw参考 [rad]
   float pitch_ref_rad;       // 视觉建议的Pitch参考 [rad]
-  float yaw_rate_ff_rad_s;   // 视觉建议的Yaw速度前馈 [rad/s]
-  float pitch_rate_ff_rad_s; // 视觉建议的Pitch速度前馈 [rad/s]
+  float yaw_rate_ff_rad_s;   // ff = feedforward，视觉建议的Yaw速度前馈 [rad/s]
+  float pitch_rate_ff_rad_s; // ff = feedforward，视觉建议的Pitch速度前馈 [rad/s]
 
 
   float yaw;   // 原始目标yaw角度 [rad]
@@ -407,6 +403,53 @@ typedef struct {
 } SysID_Feedback_s;
 
 #pragma pack()
-               // pack(1)
+
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+_Static_assert(sizeof(Chassis_Ctrl_Cmd_s) <= 60,
+               "Chassis_Ctrl_Cmd_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Upload_Data_s) <= 60,
+               "Chassis_Upload_Data_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_Fast_Pkt_s) <= 60,
+               "Chassis_Ctrl_Fast_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_State_Pkt_s) <= 60,
+               "Chassis_Ctrl_State_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_UI_Pkt_s) <= 60,
+               "Chassis_Ctrl_UI_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Ctrl_Event_Pkt_s) <= 60,
+               "Chassis_Ctrl_Event_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Feed_Fast_Pkt_s) <= 60,
+               "Chassis_Feed_Fast_Pkt_s too large for CAN comm");
+_Static_assert(sizeof(Chassis_Feed_State_Pkt_s) <= 60,
+               "Chassis_Feed_State_Pkt_s too large for CAN comm");
+#else
+typedef char
+    chassis_ctrl_cmd_size_check[(sizeof(Chassis_Ctrl_Cmd_s) <= 60) ? 1 : -1];
+typedef char chassis_upload_data_size_check[(sizeof(Chassis_Upload_Data_s) <= 60)
+                                                ? 1
+                                                : -1];
+typedef char
+    chassis_ctrl_fast_pkt_size_check[(sizeof(Chassis_Ctrl_Fast_Pkt_s) <= 60)
+                                         ? 1
+                                         : -1];
+typedef char
+    chassis_ctrl_state_pkt_size_check[(sizeof(Chassis_Ctrl_State_Pkt_s) <= 60)
+                                          ? 1
+                                          : -1];
+typedef char
+    chassis_ctrl_ui_pkt_size_check[(sizeof(Chassis_Ctrl_UI_Pkt_s) <= 60) ? 1
+                                                                          : -1];
+typedef char
+    chassis_ctrl_event_pkt_size_check[(sizeof(Chassis_Ctrl_Event_Pkt_s) <= 60)
+                                          ? 1
+                                          : -1];
+typedef char
+    chassis_feed_fast_pkt_size_check[(sizeof(Chassis_Feed_Fast_Pkt_s) <= 60)
+                                         ? 1
+                                         : -1];
+typedef char
+    chassis_feed_state_pkt_size_check[(sizeof(Chassis_Feed_State_Pkt_s) <= 60)
+                                          ? 1
+                                          : -1];
+#endif
 
 #endif // !ROBOT_DEF_H

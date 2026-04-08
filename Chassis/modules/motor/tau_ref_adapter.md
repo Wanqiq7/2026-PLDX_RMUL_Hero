@@ -16,8 +16,9 @@ PID / LQR / SMC / legacy output
 当前 `Chassis` 已接入：
 
 - DJI 电机主线：`TAU_REF -> raw current`
-- 功率控制器兼容桥：`tau_ref -> raw current/can cmd -> tau_ref`
+- 底盘功率控制：`wheel_tau_ref -> power_controller(native tau) -> limited wheel_tau_ref`
 - DM 电机：`tau_ref -> MIT torque`
+- `SetRef()`：compatibility only
 
 ## 相关文件
 
@@ -33,12 +34,30 @@ PID / LQR / SMC / legacy output
 
 1. `app` 层不应该直接拼协议帧。
 2. 新主线中，控制器应尽量直接输出 `TAU_REF`。
-3. `Chassis` 当前通过 `LegacyPowerBridge` 兼容旧功率控制器，current/raw 不再是主线语义。
-4. `DJI` 默认转矩常数按输出轴扭矩解释：
+3. `Chassis` 底盘功率控制已经直接停留在 `TAU_REF` 语义，current/raw 不再是应用层主线语义。
+4. `SetRef()` 仅用于 compatibility path，不得再作为新主线入口。
+5. `DJI` 默认转矩常数按输出轴扭矩解释：
    `GM6020 = 0.741 N·m/A`，`M3508 = 0.3 N·m/A`，`M2006 = 0.18 N·m/A`。
-5. 若 `physical_param` 不完整，`DJIMotorInit()` 会记录错误并保持电机失能，而不是运行期静默输出 0。
-6. 不再维护独立的 `control_effort.h` 或 `motor_effort_normalize.*` 文件，相关概念已压缩进电机层。
-7. 最终发送给电机的命令必须经过 adapter 构建。
+6. `power_controller` 输入输出语义已经收敛到 native tau domain，桥接旧域语义不再允许回流到应用层。
+7. 若 `physical_param` 不完整，`DJIMotorInit()` 会记录错误并保持电机失能，而不是运行期静默输出 0。
+8. 不再维护独立的 `control_effort.h` 或 `motor_effort_normalize.*` 文件，相关概念已压缩进电机层。
+9. 最终发送给电机的命令必须经过 adapter 构建。
+
+## Chassis 底盘功率控制主链路
+
+`Chassis` 当前推荐保持：
+
+```text
+wheel_tau_ref
+-> power_controller (native tau domain)
+-> limited wheel_tau_ref
+-> DJIMotorSetEffort()
+```
+
+也就是说，`ChassisTask()` 只组织轮端 `TAU_REF` 与限幅后的 `TAU_REF`，
+不再承载旧 current/raw 域换算逻辑。
+
+若需要回顾历史兼容方案，应仅在设计文档中说明，不应在代码路径中重新恢复桥接 helper。
 
 ## 示例
 

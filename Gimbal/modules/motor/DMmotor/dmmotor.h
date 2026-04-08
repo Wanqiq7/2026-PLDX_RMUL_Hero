@@ -2,7 +2,6 @@
 #define DMMOTOR_H
 
 #include "bsp_can.h"
-#include "controller.h"
 #include "daemon.h"
 #include "motor_def.h"
 
@@ -122,25 +121,83 @@ typedef enum {
 
 DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config);
 
+/**
+ * @brief 兼容接口：设置模块内串级参考角与力矩前馈
+ *
+ * @param motor 电机实例
+ * @param angle_rad 参考角 [rad]
+ * @param torque_ff 力矩前馈 [N·m]
+ *
+ * @note  常规动力执行器主线优先使用
+ *        `DMMotorCalculateTorqueEffort() -> DMMotorSetEffort()`。
+ *        `DMMotorSetRef()` 仅保留给历史串级路径与兼容调用方使用。
+ */
 void DMMotorSetRef(DMMotorInstance *motor, float angle_rad, float torque_ff);
+
+/**
+ * @brief 按当前反馈配置计算统一控制努力量（输出轴扭矩）
+ *
+ * @param motor 电机实例
+ * @param angle_rad 参考角 [rad]
+ * @param torque_ff 力矩前馈 [N·m]
+ * @param effort 输出的统一控制努力量
+ * @return uint8_t 1-成功，0-失败
+ */
 uint8_t DMMotorCalculateTorqueEffort(DMMotorInstance *motor, float angle_rad,
                                      float torque_ff,
                                      Controller_Effort_Output_s *effort);
+
+/**
+ * @brief 设置统一控制努力量，作为 DM 常规主线执行入口
+ *
+ * @param motor 电机实例
+ * @param effort 统一控制努力量；传入 NULL 时清空直通努力量
+ */
 void DMMotorSetEffort(DMMotorInstance *motor,
                       const Controller_Effort_Output_s *effort);
+
+/**
+ * @brief MIT full-command 兼容接口
+ *
+ * @note  用于扩展能力或历史路径，不属于常规 torque mainline。
+ */
 void DMMotorSetMITTargets(DMMotorInstance *motor, float angle, float omega,
                           float torque, float kp, float kd);
+
+/**
+ * @brief PVT 扩展接口
+ *
+ * @note  用于位置/速度上限/电流比例三元组场景，不属于常规 torque mainline。
+ */
 void DMMotorSetPVT(DMMotorInstance *motor, float pos_rad, float v_limit_rad_s,
                    float i_ratio);
+/**
+ * @brief 切换 DM 底层驱动模式
+ *
+ * @note  该接口只负责切换驱动模式，不会单独激活 PVT / MIT full-command /
+ *        torque mainline 等上层命令路径；命令路径必须由对应 Set* 接口显式选择。
+ */
 void DMMotorSetMode(DMMotorInstance *motor, DM_Mode_e mode);
 void DMMotorOuterLoop(DMMotorInstance *motor, Closeloop_Type_e closeloop_type);
 void DMMotorEnable(DMMotorInstance *motor);
 void DMMotorStop(DMMotorInstance *motor);
 void DMMotorCaliEncoder(DMMotorInstance *motor);
 void DMMotorControlInit();
+
+/**
+ * @brief MIT velocity-only 兼容接口
+ *
+ * @note  仅用于特殊速度直控场景，不属于常规 torque mainline。
+ */
 void DMMotorSetMITVelocity(DMMotorInstance *motor, float omega, float torque_ff,
                            float kd);
 void DMMotorSelectMITProfile(DMMotorInstance *motor, DM_MIT_Profile_e profile);
+
+/**
+ * @brief MIT profile 兼容接口
+ *
+ * @note  仅用于历史 profile 路径，不属于常规 torque mainline。
+ */
 void DMMotorSetMITTargetByProfile(DMMotorInstance *motor, float angle);
 
 #endif // DMMOTOR_H

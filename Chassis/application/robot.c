@@ -9,15 +9,7 @@
 #pragma message "check if you have configured the parameters in robot_def.h, IF NOT, please refer to the comments AND DO IT, otherwise the robot will have FATAL ERRORS!!!"
 #endif // !ROBOT_DEF_PARAM_WARNING
 
-#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
 #include "chassis.h"
-#endif
-
-#if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
-#include "gimbal.h"
-#include "shoot.h"
-#include "robot_cmd.h"
-#endif
 
 
 void RobotInit()
@@ -29,15 +21,7 @@ void RobotInit()
     
     BSPInit();
 
-#if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
-    RobotCMDInit();
-    GimbalInit();
-    ShootInit();
-#endif
-
-#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
     ChassisInit();
-#endif
 
     OSTaskInit(); // 创建基础任务
 
@@ -47,14 +31,6 @@ void RobotInit()
 
 void RobotTask()
 {
-#if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
-    RobotCMDTask();
-    GimbalTask();
-    ShootTask();
-#endif
-
-#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
     ChassisTask();
-#endif
 
 }

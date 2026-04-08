@@ -17,15 +17,37 @@
 
 dji_motor模块对DJI智能电机，包括M2006，M3508以及GM6020进行了详尽的封装。当前推荐的动力执行器主线是：上层输出 `Controller_Effort_Output`（优先使用 `TAU_REF`），再通过 `DJIMotorSetEffort()` 进入电机模块；`DJIMotorSetRef()` 仅作为兼容参考接口保留。
 
+当前接口边界请按下面理解：
+
+```text
+常规动力执行器主线
+-> DJIMotorCalculateEffort()
+-> Controller_Effort_Output(TAU_REF)
+-> DJIMotorSetEffort()
+-> adapter
+-> raw current command
+```
+
+- `DJIMotorSetEffort()`
+  - 常规主线入口
+- `DJIMotorSetRef()`
+  - compatibility only
+- `DJIMotorSetRawRef()`
+  - bypass only（辨识/调试/特殊注入）
+
+因此，本文后续若仍出现大量 `DJIMotorSetRef()` 示例，请将其理解为**历史兼容路径说明**，而不是当前推荐主线。
+
 **==设定值的单位==**
 
-1. ==位置环为**角度制**（0-360，total_angle可以为任意值）==
+1. ==兼容 `SetRef()` 路径下，位置环为**角度制**（0-360，total_angle可以为任意值）==
 
-2. ==速度环为角速度，单位为**度/每秒**（deg/sec）==
+2. ==兼容 `SetRef()` 路径下，速度环为角速度，单位为**度/每秒**（deg/sec）==
 
-3. ==电流环为A==
+3. ==兼容 `SetRef()` 路径下，电流环为A==
 
-4. ==GM6020的输入设定为**力矩**，待测量（-30000~30000）==
+4. ==统一 `SetEffort()` 主线下，推荐使用输出轴扭矩 `TAU_REF`==
+
+   ==历史 `SetRef()`/旧控制律路径仍可能使用电流或原始量纲，请以对应调用链注释为准==
 
    ==M3508的输入设定为-20A~20A （-16384~16384）==
 
@@ -163,19 +185,26 @@ dji_motor_instance *djimotor = DJIMotorInit(config); // 设置好参数后进行
 
 ---
 
-要控制一个DJI电机，我们提供了2个接口：
+要控制一个 DJI 电机，当前应优先按“主线接口 / 历史兼容接口”分开理解：
 
 ```c
-void DJIMotorSetRef(dji_motor_instance *motor, float ref);
+/* 当前主线 */
+uint8_t DJIMotorCalculateEffort(dji_motor_instance *motor, float ref,
+                                Controller_Effort_Output_s *effort);
+void DJIMotorSetEffort(dji_motor_instance *motor,
+                       const Controller_Effort_Output_s *effort);
 
+/* 历史兼容 */
+void DJIMotorSetRef(dji_motor_instance *motor, float ref);
 void DJIMotorChangeFeed(dji_motor_instance *motor, 
                         Closeloop_Type_e loop, 
                         Feedback_Source_e type);
 ```
 
-调用第一个并传入设定值，它会自动根据你设定的PID参数进行动作。 如果对不同闭环都有参考输入,则设置最外层的闭环(通过此函数)并将剩下的参考输入通过前馈数据指针进行设定
+当前常规主线应先调用 `DJIMotorCalculateEffort()` 生成统一 `Controller_Effort_Output(TAU_REF)`，
+再交给 `DJIMotorSetEffort()` 进入电机模块。
 
-调用第二个并设定要修改的反馈环节和反馈类型，它会将反馈数据指针切换到你设定好的变量（需要在初始化的时候设置反馈指针）。
+`DJIMotorSetRef()` 只保留给历史兼容路径；`DJIMotorChangeFeed()` 仍用于切换反馈来源。
 
 **如果需要获取电机的反馈数据**（如小陀螺模式需要根据麦克纳姆轮逆运动学解算底盘速度），直接通过你拥有的`dji_motor_instance`访问成员变量：
 
@@ -316,11 +345,42 @@ typedef struct
 
   三个PID分别为三个控制闭环所用，在`DJIMotorControl()`中，该函数会根据`close_loop_type`的设定计算对应的闭环。
 
-  **`pid_ref`是控制的设定值，app层的应用想要更改电机的输出，就要调用`DJIMotorSetRef()`更改此值。**
+  **`pid_ref` 是模块内部的参考 carrier。**  
+  它主要服务于历史 `DJIMotorSetRef()` 兼容路径与模块内串级闭环，不应再被理解为当前 app 层常规主线的推荐输出入口。  
+  对于新的常规动力执行器链路，推荐做法已经改为：**上层先 `DJIMotorCalculateEffort()`，再把 `Controller_Effort_Output` 交给 `DJIMotorSetEffort()`。**
 
 - `dji_motor_instance`是一个DJI电机实例。一个电机实例内包含电机的反馈信息，电机的控制设置，电机控制器，电机对应的CAN实例以及电机的类型；由于DJI电机支持**一帧报文控制至多4个电机**，该结构体还包含了用于给电机分组发送进行特殊处理的`sender_group`和`message_num`（具体实现细节参考`MotorSenderGrouping()`函数）。
 
 ## 外部接口
+
+这一节需要分开理解：
+
+### 当前主线
+
+当前推荐的常规动力执行器主线是：
+
+```text
+reference
+-> DJIMotorCalculateEffort()
+-> Controller_Effort_Output(TAU_REF)
+-> DJIMotorSetEffort()
+-> DJIMotorControl()
+```
+
+这里 `DJIMotorSetEffort()` 是当前主线入口；`DJIMotorControl()` 负责把统一努力量继续落到适配器和报文发送层。
+
+### 历史兼容路径
+
+`DJIMotorSetRef()` 与基于 `pid_ref` 的旧 `DJIMotorControl()` 说明仍然保留，但它们属于**历史兼容路径**：
+
+```text
+legacy ref
+-> DJIMotorSetRef()
+-> pid_ref
+-> DJIMotorControl()
+```
+
+后文若继续出现 `DJIMotorSetRef()` 示例，应理解为兼容说明，而不是当前推荐主线。
 
 ```c
 dji_motor_instance *DJIMotorInit(can_instance_config config,
@@ -345,11 +405,16 @@ void DJIMotorOuterLoop(dji_motor_instance *motor);
 
 - `DJIMotorInit()`是用于初始化电机对象的接口，传入包括电机can配置、电机控制配置、电机控制器配置以及电机类型在内的初始化参数。**它将会返回一个电机实例指针**，你应当在应用层保存这个指针，这样才能操控这个电机。
 
-- `DJIMotorSetRef()`是设定电机输出的接口，**在调用这个函数的时候，你可以认为你的设定值会直接转变为电机的输出**。`DJIMotorControl()`会帮你完成闭环计算，不用担心PID。
+- `DJIMotorSetRef()` 是历史兼容接口。它会把参考值写入内部 `pid_ref` carrier，再由旧闭环路径在 `DJIMotorControl()` 中继续解释。  
+  新的常规主线不应再把它当作默认输出入口。
+
+- `DJIMotorSetEffort()` 与 `DJIMotorCalculateEffort()` 共同组成当前推荐主线：上层先完成控制器计算，再通过统一努力量接口进入电机模块。
 
 - `DJIMotorChangeFeed()`一般在更改云台或底盘的运动模式的时候被调用，传入要修改反馈来源的电机实例指针、要修改的闭环以及反馈来源类型。如希望切换到IMU的yaw值作为云台设定值，传入yaw轴电机实例和`ANGLE_LOOP`（位置环）、`OTHER_FEED`（启用其他数据来源）即可。当然，你需要在初始化的时候设定`motor_controller`中的 `other_angle_feedback_ptr`，使其指向yaw值的变量。
 
-- `DJIMotorControl()`是根据电机的配置计算控制值的函数。该函数在`motor_task.c`中被调用，应当在freeRTOS中以一定频率运行。此函数为PID的计算进行了彻底的封装，要修改电机的参考输入，请在app层的应用中调用`DJIMotorSetRef()`。
+- `DJIMotorControl()` 是模块周期任务入口。  
+  在当前主线下，它负责消费 `DJIMotorSetEffort()` 提交的统一努力量；在历史兼容路径下，它也仍然会解释 `pid_ref`。  
+  因此这里既承接主线，也承接兼容路径，但**不应再把“app 层调用 `DJIMotorSetRef()` 改参考”描述成当前推荐方式。**
 
   该函数的具体实现请参照代码，注释已经较为清晰。流程大致为：
 
@@ -461,10 +526,18 @@ Motor_Init_Config_s config = {
 dji_motor_instance *djimotor = DJIMotorInit(&config);
 ```
 
-然后在任务中修改电机设定值即可实现控制：
+当前主线推荐写法：
+
+```
+Controller_Effort_Output_s effort = {0};
+DJIMotorCalculateEffort(djimotor, 10, &effort);
+DJIMotorSetEffort(djimotor, &effort);
+```
+
+若你维护的是历史兼容链路，仍可以保留：
 
 ```
 DJIMotorSetRef(djimotor, 10);
 ```
 
-前提是已经将`DJIMotorControl()`放入实时系统任务当中或以一定d。你也可以单独执行`DJIMotorControl()`。
+前提是已经将 `DJIMotorControl()` 放入实时系统任务中。两种写法不要在“当前推荐主线”这一层混用描述。

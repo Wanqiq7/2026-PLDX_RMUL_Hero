@@ -119,20 +119,20 @@ bsp/usb/bsp_usb.c \
 bsp/log/bsp_log.c \
 bsp/flash/bsp_flash.c \
 bsp/bsp_tools.c \
-modules/algorithm/controller.c \
-modules/algorithm/kalman_filter.c \
-modules/algorithm/QuaternionEKF.c \
-modules/algorithm/crc8.c \
-modules/algorithm/crc16.c \
-modules/algorithm/user_lib.c \
-modules/bluetooth/HC05.c \
+modules/algorithm/controllers/pid/pid_controller.c \
+modules/algorithm/controllers/lqr/lqr_controller.c \
+modules/algorithm/controllers/domain/chassis_force_control.c \
+modules/algorithm/controllers/domain/shoot_effort_controller.c \
+modules/algorithm/estimation/kalman/kalman_filter.c \
+modules/algorithm/estimation/attitude/quaternion_ekf.c \
+modules/algorithm/estimation/identification/rls_estimator.c \
+modules/algorithm/utils/checksum/crc8.c \
+modules/algorithm/utils/checksum/crc16.c \
+modules/algorithm/utils/math/user_lib.c \
 modules/BMI088/bmi088.c \
 modules/imu/BMI088driver.c \
 modules/imu/BMI088Middleware.c \
 modules/imu/ins_task.c \
-modules/ist8310/ist8310.c \
-modules/master_machine/master_process.c \
-modules/master_machine/seasky_protocol.c \
 modules/motor/DJImotor/dji_motor.c \
 modules/motor/HTmotor/HT04.c \
 modules/motor/LKmotor/LK9025.c \
@@ -140,12 +140,10 @@ modules/motor/DMmotor/dmmotor.c \
 modules/motor/step_motor/step_motor.c \
 modules/motor/servo_motor/servo_motor.c \
 modules/motor/motor_task.c \
-modules/oled/oled.c \
 modules/referee/crc_ref.c \
 modules/referee/rm_referee.c \
 modules/referee/referee_UI.c \
 modules/referee/referee_task.c \
-modules/remote/remote_control.c \
 modules/super_cap/super_cap.c \
 modules/vofa/VOFA.c \
 modules/can_comm/can_comm.c \
@@ -153,10 +151,7 @@ modules/message_center/message_center.c \
 modules/daemon/daemon.c \
 modules/alarm/buzzer.c \
 modules/power_controller/power_controller.c \
-application/gimbal/gimbal.c \
 application/chassis/chassis.c \
-application/shoot/shoot.c \
-application/cmd/robot_cmd.c \
 application/sysid/sysid_task.c \
 application/robot.c
 
@@ -233,9 +228,6 @@ C_INCLUDES =  \
 -IMiddlewares/Third_Party/SEGGER/RTT \
 -IMiddlewares/Third_Party/SEGGER/Config \
 -Iapplication/chassis \
--Iapplication/shoot \
--Iapplication/gimbal \
--Iapplication/cmd \
 -Iapplication/sysid \
 -Iapplication \
 -Ibsp/dwt \
@@ -250,11 +242,8 @@ C_INCLUDES =  \
 -Ibsp/pwm \
 -Ibsp \
 -Imodules/algorithm \
--Imodules/bluetooth \
 -Imodules/BMI088 \
 -Imodules/imu \
--Imodules/ist8310 \
--Imodules/master_machine \
 -Imodules/motor/DJImotor \
 -Imodules/motor/LKmotor \
 -Imodules/motor/HTmotor \
@@ -262,9 +251,7 @@ C_INCLUDES =  \
 -Imodules/motor/servo_motor \
 -Imodules/motor/DMmotor \
 -Imodules/motor \
--Imodules/oled \
 -Imodules/referee \
--Imodules/remote \
 -Imodules/super_cap \
 -Imodules/vofa \
 -Imodules/can_comm \

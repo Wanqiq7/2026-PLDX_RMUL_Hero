@@ -17,7 +17,6 @@
 #define DJI_MOTOR_H
 
 #include "bsp_can.h"
-#include "controller.h"
 #include "daemon.h"
 #include "motor_def.h"
 #include "stdint.h"
@@ -103,6 +102,8 @@ void DJIMotorSetRef(DJIMotorInstance *motor, float ref);
  *
  * @param motor 要设置的电机
  * @param effort 统一控制努力量；传入 NULL 时清空直通努力量
+ *
+ * @note  调用后会清空兼容/旁路参考 carrier (`pid_ref`)，避免主线与旧入口状态同时悬挂。
  */
 void DJIMotorSetEffort(DJIMotorInstance *motor,
                        const Controller_Effort_Output_s *effort);

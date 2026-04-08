@@ -1,0 +1,196 @@
+{
+  "contract_version": "phase3-golden-v1",
+  "module": "power_controller",
+  "focus": "PowerGetLimitedOutput",
+  "harness": "tests/harnesses/power_controller_sample_harness.c",
+  "samples": [
+    {
+      "sample_id": "limit-passthrough-01",
+      "purpose": "冻结 sum_positive_power <= max_power 时的直通行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "max_power_w": 200.0,
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1,
+        "feedback_motor_speeds": [18.0, 17.0, 16.0, 15.0],
+        "feedback_motor_torques": [2.0, 1.8, 1.6, 1.4],
+        "motor_objs": [
+          { "pid_output": 2000.0, "current_av": 18.0, "target_av": 20.0 },
+          { "pid_output": 1800.0, "current_av": 17.0, "target_av": 19.0 },
+          { "pid_output": 1600.0, "current_av": 16.0, "target_av": 18.0 },
+          { "pid_output": 1400.0, "current_av": 15.0, "target_av": 17.0 }
+        ]
+      },
+      "expected_output": {
+        "limited_output": [2000.0, 1800.0, 1600.0, 1400.0],
+        "cmd_power_sum_w": 146.932,
+        "effective_max_power_w": 200.0,
+        "distribution_mode": "passthrough"
+      },
+      "tolerance": {
+        "limited_output": 0.000001,
+        "cmd_power_sum_w": 0.000001,
+        "effective_max_power_w": 0.000001
+      },
+      "notes": "覆盖快路径。"
+    },
+    {
+      "sample_id": "limit-mixed-distribution-01",
+      "purpose": "冻结阈值中间区间的 mixed 分配行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "max_power_w": 70.0,
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1,
+        "feedback_motor_speeds": [25.0, 24.0, 23.0, 22.0],
+        "feedback_motor_torques": [6.0, 5.8, 5.6, 5.4],
+        "motor_objs": [
+          { "pid_output": 6000.0, "current_av": 25.0, "target_av": 29.0 },
+          { "pid_output": 5800.0, "current_av": 24.0, "target_av": 28.5 },
+          { "pid_output": 5600.0, "current_av": 23.0, "target_av": 27.0 },
+          { "pid_output": 5400.0, "current_av": 22.0, "target_av": 26.5 }
+        ]
+      },
+      "expected_output": {
+        "limited_output": [450.206029, 477.455514, 439.842382, 471.536088],
+        "cmd_power_sum_w": 718.772,
+        "effective_max_power_w": 70.0,
+        "distribution_mode": "mixed"
+      },
+      "tolerance": {
+        "limited_output": 0.000001,
+        "cmd_power_sum_w": 0.000001,
+        "effective_max_power_w": 0.000001
+      },
+      "notes": "覆盖 proportional/error 混合权重区间。"
+    },
+    {
+      "sample_id": "limit-error-distribution-01",
+      "purpose": "冻结高误差阈值以上时 error 分配主导的行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "max_power_w": 65.0,
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1,
+        "feedback_motor_speeds": [21.0, 20.0, 19.0, 18.0],
+        "feedback_motor_torques": [6.2, 6.0, 5.8, 5.6],
+        "motor_objs": [
+          { "pid_output": 6200.0, "current_av": 21.0, "target_av": 29.0 },
+          { "pid_output": 6000.0, "current_av": 20.0, "target_av": 28.0 },
+          { "pid_output": 5800.0, "current_av": 19.0, "target_av": 27.0 },
+          { "pid_output": 5600.0, "current_av": 18.0, "target_av": 26.0 }
+        ]
+      },
+      "expected_output": {
+        "limited_output": [479.933189, 512.962188, 549.114127, 588.829746],
+        "cmd_power_sum_w": 650.788,
+        "effective_max_power_w": 65.0,
+        "distribution_mode": "error"
+      },
+      "tolerance": {
+        "limited_output": 0.000001,
+        "cmd_power_sum_w": 0.000001,
+        "effective_max_power_w": 0.000001
+      },
+      "notes": "覆盖 ERROR_POWER_DISTRIBUTION_THRESHOLD 以上分支。"
+    },
+    {
+      "sample_id": "limit-negative-power-compensation-01",
+      "purpose": "冻结负功率支路回补 max_power 的行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "max_power_w": 55.0,
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1,
+        "feedback_motor_speeds": [22.0, 18.0, 20.0, 19.0],
+        "feedback_motor_torques": [6.0, -2.5, 5.0, 4.8],
+        "motor_objs": [
+          { "pid_output": 6000.0, "current_av": 22.0, "target_av": 27.0 },
+          { "pid_output": -2500.0, "current_av": 18.0, "target_av": 12.0 },
+          { "pid_output": 5000.0, "current_av": 20.0, "target_av": 25.0 },
+          { "pid_output": 4800.0, "current_av": 19.0, "target_av": 24.0 }
+        ]
+      },
+      "expected_output": {
+        "limited_output": [643.85975, -2500.0, 723.694982, 769.083842],
+        "cmd_power_sum_w": 409.028,
+        "effective_max_power_w": 87.265,
+        "distribution_mode": "error"
+      },
+      "tolerance": {
+        "limited_output": 0.000001,
+        "cmd_power_sum_w": 0.000001,
+        "effective_max_power_w": 0.000001
+      },
+      "notes": "覆盖带负功率支路的样本。"
+    },
+    {
+      "sample_id": "limit-disconnect-historical-behavior-01",
+      "purpose": "冻结断连电机在限功率路径中仍会被后续零功率分支覆盖回 pid_output 的历史行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "max_power_w": 50.0,
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1,
+        "motor_online": [1, 0, 1, 1],
+        "motor_disconnect_cycles": [0, 1000, 0, 0],
+        "feedback_motor_speeds": [20.0, 19.0, 18.0, 17.0],
+        "feedback_motor_torques": [5.0, 4.8, 4.6, 4.4],
+        "motor_objs": [
+          { "pid_output": 5000.0, "current_av": 20.0, "target_av": 26.0 },
+          { "pid_output": 4800.0, "current_av": 19.0, "target_av": 25.0 },
+          { "pid_output": 4600.0, "current_av": 18.0, "target_av": 24.0 },
+          { "pid_output": 4400.0, "current_av": 17.0, "target_av": 23.0 }
+        ]
+      },
+      "expected_output": {
+        "limited_output": [334.535173, 4800.0, 393.298846, 427.399728],
+        "cmd_power_sum_w": 352.149,
+        "effective_max_power_w": 50.0,
+        "distribution_mode": "error"
+      },
+      "tolerance": {
+        "limited_output": 0.000001,
+        "cmd_power_sum_w": 0.000001,
+        "effective_max_power_w": 0.000001
+      },
+      "notes": "这是需要在 Phase 4 前明确冻结的历史语义，不在本轮修复。"
+    },
+    {
+      "sample_id": "limit-near-zero-and-discriminant-01",
+      "purpose": "冻结近零力矩与低分配功率边界下的输出缩放行为。",
+      "source": { "kind": "synthetic-boundary", "detail": "near-zero torque and low-power boundary sample" },
+      "input": {
+        "max_power_w": 18.0,
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1,
+        "feedback_motor_speeds": [30.0, 35.0, 34.0, 33.0],
+        "feedback_motor_torques": [0.0, 4.0, 3.8, 3.6],
+        "motor_objs": [
+          { "pid_output": 0.0005, "current_av": 30.0, "target_av": 30.5 },
+          { "pid_output": 4000.0, "current_av": 35.0, "target_av": 40.0 },
+          { "pid_output": 3800.0, "current_av": 34.0, "target_av": 38.0 },
+          { "pid_output": 3600.0, "current_av": 33.0, "target_av": 36.5 }
+        ]
+      },
+      "expected_output": {
+        "limited_output": [0.0005, 47.467009, 31.391052, 15.27289],
+        "cmd_power_sum_w": 474.220015,
+        "effective_max_power_w": 30.0,
+        "distribution_mode": "proportional"
+      },
+      "tolerance": {
+        "limited_output": 0.000001,
+        "cmd_power_sum_w": 0.000001,
+        "effective_max_power_w": 0.000001
+      },
+      "notes": "覆盖 near-zero torque 与低功率边界。"
+    }
+  ]
+}

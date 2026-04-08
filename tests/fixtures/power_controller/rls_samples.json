@@ -1,0 +1,153 @@
+{
+  "contract_version": "phase3-golden-v1",
+  "module": "power_controller",
+  "focus": "PowerRLSUpdate",
+  "harness": "tests/harnesses/power_controller_sample_harness.c",
+  "samples": [
+    {
+      "sample_id": "rls-low-power-no-update-01",
+      "purpose": "冻结低功率噪声输入下 RLS 不更新的行为。",
+      "source": { "kind": "synthetic-boundary", "detail": "threshold guard sample" },
+      "input": {
+        "feedback_power_w": 4.0,
+        "motor_speeds": [10.0, 10.0, 10.0, 10.0],
+        "motor_torques": [1.0, 1.0, 1.0, 1.0],
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "k1_after": 0.22,
+        "k2_after": 1.2,
+        "rls_updated": false
+      },
+      "tolerance": {
+        "k1_after": 0.000001,
+        "k2_after": 0.000001
+      },
+      "notes": "验证 |feedback_power_w| < 5W 时直接 return。"
+    },
+    {
+      "sample_id": "rls-positive-loss-update-01",
+      "purpose": "冻结常规正损耗样本的单步更新结果。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "feedback_power_w": 180.0,
+        "motor_speeds": [25.0, 24.0, 26.0, 25.5],
+        "motor_torques": [1.5, 1.6, 1.4, 1.5],
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "k1_after": 0.212026,
+        "k2_after": 1.199284,
+        "rls_updated": true
+      },
+      "tolerance": {
+        "k1_after": 0.000001,
+        "k2_after": 0.000001
+      },
+      "notes": "对应计划中的 steady positive loss 类别。"
+    },
+    {
+      "sample_id": "rls-high-speed-low-torque-01",
+      "purpose": "冻结高速低矩工况下 k1 主导收敛的单步更新结果。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "feedback_power_w": 95.0,
+        "motor_speeds": [60.0, 58.0, 62.0, 61.0],
+        "motor_torques": [0.4, 0.35, 0.45, 0.4],
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "k1_after": 0.126593,
+        "k2_after": 1.19975,
+        "rls_updated": true
+      },
+      "tolerance": {
+        "k1_after": 0.000001,
+        "k2_after": 0.000001
+      },
+      "notes": "覆盖 Σ|ω| 主导的识别样本。"
+    },
+    {
+      "sample_id": "rls-low-speed-high-torque-01",
+      "purpose": "冻结低速高矩工况下 k2 主导收敛的单步更新结果。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "feedback_power_w": 105.0,
+        "motor_speeds": [5.0, 6.0, 5.5, 4.5],
+        "motor_torques": [2.8, 2.6, 2.9, 2.7],
+        "referee_online": 1,
+        "cap_online": 0,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "k1_after": 0.220258,
+        "k2_after": 1.200372,
+        "rls_updated": true
+      },
+      "tolerance": {
+        "k1_after": 0.000001,
+        "k2_after": 0.000001
+      },
+      "notes": "覆盖 Στ² 主导的识别样本。"
+    },
+    {
+      "sample_id": "rls-sequence-01",
+      "purpose": "冻结连续 3 步样本后的参数轨迹终点。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline multi-step" },
+      "steps": [
+        {
+          "referee_online": 1,
+          "robot_level": 1,
+          "ref_limit_w": 100.0,
+          "buffer_energy": 60.0,
+          "referee_power_w": 120.0,
+          "cap_online": 0,
+          "cap_energy_percent": 0,
+          "motor_speeds": [20.0, 21.0, 19.5, 20.5],
+          "motor_torques": [1.1, 1.0, 1.2, 1.1],
+          "run_task_iterations": 1
+        },
+        {
+          "referee_online": 1,
+          "robot_level": 1,
+          "ref_limit_w": 100.0,
+          "buffer_energy": 58.0,
+          "referee_power_w": 124.0,
+          "cap_online": 0,
+          "cap_energy_percent": 0,
+          "motor_speeds": [22.0, 21.5, 22.5, 21.0],
+          "motor_torques": [1.2, 1.1, 1.25, 1.15],
+          "run_task_iterations": 1
+        },
+        {
+          "referee_online": 1,
+          "robot_level": 1,
+          "ref_limit_w": 100.0,
+          "buffer_energy": 56.0,
+          "referee_power_w": 128.0,
+          "cap_online": 0,
+          "cap_energy_percent": 0,
+          "motor_speeds": [23.0, 22.5, 23.5, 22.0],
+          "motor_torques": [1.25, 1.2, 1.3, 1.22],
+          "run_task_iterations": 1
+        }
+      ],
+      "expected_state": {
+        "k1_after": 0.200942,
+        "k2_after": 1.19871,
+        "rls_updated": true
+      },
+      "tolerance": {
+        "k1_after": 0.000001,
+        "k2_after": 0.000001
+      },
+      "notes": "覆盖多步序列样本冻结。"
+    }
+  ]
+}

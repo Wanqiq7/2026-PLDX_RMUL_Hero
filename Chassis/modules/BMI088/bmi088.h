@@ -3,9 +3,11 @@
 
 #include "bsp_spi.h"
 #include "bsp_gpio.h"
-#include "controller.h"
+#include "controllers/pid/pid_controller.h"
 #include "bsp_pwm.h"
 #include "stdint.h"
+
+// TODO: 后续需先拆分 public config 与 private runtime state，再移除对 bsp/controller 头的直接暴露。
 
 // bmi088工作模式枚举
 typedef enum

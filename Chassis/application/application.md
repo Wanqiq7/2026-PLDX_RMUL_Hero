@@ -1,52 +1,124 @@
-# application
+# Chassis Application
 
 <p align='right'>neozng1@hnu.edu.cn</p>
 
-这是application层的说明。
+## 1. 定位
 
-> todo: 是否有必要将所有电机等模块的初始化参数放到一个头文件？
+当前工作树固定为**严格双板专用**的底盘板工程，`robot_def.h` 中只保留 `#define CHASSIS_BOARD`。
 
-## 使用说明
+底盘板的职责不是“运行整车所有应用”，而是承担以下本板执行链：
 
-在main函数中包含`robot.h`头文件，这是对整车的抽象。将`INStask`，`motortask`，`ledtask`，`monitortask`这四个task加入`freertos.c`中，创建对应的任务，设置合适的任务运行间隔；然后将`robottask`放入freertos.c中，同样以一定的频率运行。 在初始化实时系统之前，在`main()`中调用`RobotInit()`进行整车的初始化。
+- `chassis`：底盘运动主线与执行输出
+- `sysid`：底盘侧系统辨识/诊断链路
+- `power / super_cap / referee / UI`：底盘功率管理、裁判信息处理与回传
+- `can_comm`：与云台板交换控制摘要和状态反馈
 
-**关于运行的任务**，INStask的运行频率必须为1kHz，motortask推荐的运行频率为200Hz\~1000Hz（详情见module/motor/motor_task.c），在MotorTask内部，对于高实时性要求的电机可以提升到1kHz，不过要注意CAN总线的负载。monitortask的运行频率为100Hz；robottask的运行频率推荐为150Hz以上，应当高于视觉发送的频率，若后续使用插帧，同样应该保证不低过motortask太多。
+以下应用**不再属于底盘板运行时模型**：
 
-若使用双板，则在`robot_def.h`中给对应的开发板设定宏定义，如底盘板使用`#define CHASSIS_BOARD`，云台板使用`#define GIMBAL_BOARD`；单个开发板控制整车，则定义`#define ONE_BOARD`。在每个应用中，都已经使用编译预处理指令完成条件编译，会自动根据设定的宏切换功能。使用双板的时候，目前板间通信通过CAN完成，因此两个开发板会挂载在一条总线上，在两个开发板对这条总线的其他使用CAN的设备进行配置时注意**不要发生ID冲突**，还要注意**防止负载过大**。
+- `robot_cmd`
+- `gimbal`
+- `shoot`
+- `vision`
 
-**同样，在该文件中你需要修改一些关于机器人的参数**。比如底盘和云台对齐时yaw电机编码器的值，拨盘的单圈载弹量、底盘的轴距等等。
+这些职责已经完全拆分到对侧云台板工程。
 
+## 2. 实际运行入口
 
+当前运行入口以 [robot.c](D:/RoboMaster/HeroCode/Code/.worktrees/tau-ref-unified-local/Chassis/application/robot.c) 为准：
 
-## 封装总览
+```c
+void RobotInit(void) {
+  BSPInit();
+  ChassisInit();
+  OSTaskInit();
+}
 
-Robot.c是整个机器人的抽象，其下有4个应用：robot_cmd，gimbal，chassis，shoot。此框架当前是针对步兵/英雄/哨兵设计的，其他机器人只需要根据各自的特殊机构进行修改即可。robot_cmd是整个机器人的核心应用，其负责接受遥控器/上位机发来的指令，并将指令转化为实际的运动控制目标，发送给其他三个应用。后者会根据robot_cmd发来的命令，设定电机和其他执行单元的参考值等。
-
-为了进一步解耦应用之间的关系，app层并没有module和bsp之间的那种层级结构（或设计模式中所谓的**结构类型模式**，即robot_cmd包含其他三个模块），而采用了应用并列的**发布-订阅**机制，四个应用之间没有任何相互包含关系，他们之间的通信通过module层提供的`message_center`实现。每个应用会通过该模块向一些话题（事件）发布一些消息，同时从一些话题订阅消息。如robot_cmd应用会发布其他三个模块的控制信息，同时订阅其他三个模块的反馈信息。其他三个模块会订阅robot_cmd发布的控制信息，同时发布反馈给robot_cmd的信息，他们不需要知道彼此的存在，只是从`message_center`处获取其他应用发布的消息或向自己发布的话题推送消息。
-
-application在初始化module的时候，初始化参数会包含部分bsp的内容，但仅仅是外设和引脚的选择以及id设置（用于通信的外设需要id设置）。实际上当前框架的app层和cubemx初始化部分耦合，在配置的时候就必须确定每个外设的作用和归属权，一旦cubemx完成设置app层必须按照对应参数设置引脚和并分配module的外设。后续考虑将cubemx和bsp耦合，去除顶层代码和底层的关系
-
-
-
-## 整车程序流程
-
-```mermaid
-graph TD
-main调用RobotInit进行初始化 --> RobotInit调用基础bsp初始化以及各个app的初始化 --> 各个app进行消息订阅初始化和自有模块的初始化 --> 启动实时系统 --> 各任务开始运行
-
+void RobotTask(void) {
+  ChassisTask();
+}
 ```
 
-任务开始之后，每个app之间的交互关系如下：
+这意味着底盘板应用层对外只有一条主运行入口：
 
-```mermaid
-graph TD
-robot_cmd获取遥控器/上位机指令以及各个应用发布的回传信息 --> 将指令转化为具体的控制信息 --> 发布指令到对应话题
+```text
+RobotInit
+-> ChassisInit
+-> OSTaskInit
+
+RobotTask
+-> ChassisTask
 ```
 
-gimbal/chassis/shoot则根据订阅的robot_cmd发布的消息，将具体的控制信息根据当前模式转化为执行单元的目标值，通过自己拥有的模块完成这些指令，然后把回传的信息发布到对应话题。
+`sysid / power / referee / UI / can link` 属于 `ChassisInit()` 与 `ChassisTask()` 内部管理的底盘侧职责，而不是独立的跨板应用编排入口。
 
-每个应用的具体流程和实现，参见它们各自的说明文档。
+## 3. 双板运行模型
 
-## 开发要点
+底盘板运行时只接受来自云台板的 CAN 控制摘要，并回传底盘状态。
 
-各个应用之间务必通过`message_center`以发布-订阅的方式进行消息交换，不要出现包含关系，这可以大大减小耦合度并提高合作开发的效率。
+### 输入
+
+- 云台板下发的底盘控制摘要
+- 裁判系统状态
+- 超级电容状态
+- 本板底盘电机和 IMU 反馈
+
+### 输出
+
+- 四轮执行输出
+- 功率限制后的底盘状态
+- 裁判/UI 相关回传
+- 底盘状态反馈给云台板
+
+运行时抽象应理解为：
+
+```text
+Gimbal board
+-> CAN control summary
+-> Chassis board
+-> chassis mainline / power controller / referee-ui feedback
+-> CAN state feedback
+-> Gimbal board
+```
+
+## 4. 板内边界
+
+底盘板内部仍然允许使用 `message_center` 组织本板模块，但**不能再把它理解为跨板总线**。
+
+明确约束如下：
+
+- 板间通信只能通过 `CANComm` 链路完成。
+- 底盘板不能再假设本地存在 `robot_cmd` 发布底盘控制话题。
+- 底盘板不能保留“单板整车 pub/sub”叙事。
+- 文档和代码都应把“来自云台板的 CAN 摘要”视为唯一常规上游控制源。
+
+## 5. 初始化与任务建议
+
+在 `main()` 中：
+
+1. 包含 `robot.h`
+2. 在启动 RTOS 前调用 `RobotInit()`
+3. 在任务循环中调用 `RobotTask()`
+
+基础任务频率仍按原工程约束维护：
+
+- `INStask`：1 kHz
+- `motortask`：200 Hz 到 1000 Hz
+- `monitortask`：100 Hz
+- `robottask`：建议不低于 150 Hz
+
+这些频率描述只说明底盘板本地调度要求，不意味着底盘板重新承担云台/发射/视觉应用。
+
+## 6. 维护规则
+
+后续若继续优化底盘板 application 层，请遵守以下规则：
+
+- 不要重新引入历史单板运行宏或“单板整车”叙事。
+- 不要把云台板应用职责写回底盘板 application 文档。
+- 不要把跨板 CAN 摘要误写成 `message_center` 的本地应用消息。
+- 若新增底盘侧辅助能力，应明确它是 `ChassisTask()` 的内部子职责，还是新的底盘板专用应用入口。
+
+## 7. 相关文档
+
+- [chassis.md](D:/RoboMaster/HeroCode/Code/.worktrees/tau-ref-unified-local/Chassis/application/chassis/chassis.md)
+- [task_plan.md](D:/RoboMaster/HeroCode/Code/.worktrees/tau-ref-unified-local/task_plan.md)
+- [2026-04-07-mainline-roadmap-and-power-controller-timing.md](D:/RoboMaster/HeroCode/Code/.worktrees/tau-ref-unified-local/docs/superpowers/specs/2026-04-07-mainline-roadmap-and-power-controller-timing.md)

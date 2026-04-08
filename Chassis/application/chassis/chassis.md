@@ -18,7 +18,7 @@
    - 速度闭环到力/扭矩
    - 力分配
    - 力到电流转换与摩擦补偿
-6. 获取裁判系统和超级电容数据，并通过 `power_controller` 对轮端输出做功率限制。
+6. 获取裁判系统和超级电容数据，并通过 `power_controller(native tau domain)` 对轮端输出做功率限制。
 7. 设置底盘反馈数据，包括热量、功率上限和弹速限制等。
 8. 更新 UI 状态和遥测。
 9. 将反馈数据推送到消息中心；双板模式下通过 `ChassisCanLinkSendFeedbackIfDue()` 分周期发送。
@@ -33,6 +33,26 @@
   负责底盘力控控制核，包括速度估算、力分配、轮端电流计算。
 - `modules/power_controller/*`
   负责功率限制、RLS 参数辨识和能量环。
+- `modules/power_controller/*`
+  负责功率限制、RLS 参数辨识和能量环，并直接消费/输出轮端 `tau_ref`。
+
+## 功率控制主链路
+
+当前 `Chassis` 常规主线为：
+
+```text
+wheel_tau_ref
+-> power_controller (native tau domain)
+-> limited wheel_tau_ref
+-> DJIMotorSetEffort()
+```
+
+这里的要求是：
+
+1. 主线语义始终保持在 `TAU_REF`
+2. 应用层不再承载旧 current/raw 域换算
+3. `power_controller` 的受限结果直接回到 `wheel_tau_ref`
+4. `DJIMotorSetEffort()` 仍然是底盘执行出口
 
 ### 后续支持平衡底盘
 

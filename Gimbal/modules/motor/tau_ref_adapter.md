@@ -18,6 +18,8 @@ PID / LQR / SMC / legacy output
 - DJI 电机主线：`TAU_REF -> raw current`
 - DJI bypass：`SetRawRef() -> raw current`
 - DM 电机：`tau_ref -> MIT torque`
+- `SetRef()`：compatibility only
+- `MIT full / PVT`：extension only
 
 ## 相关文件
 
@@ -34,11 +36,26 @@ PID / LQR / SMC / legacy output
 1. `app` 层不应该直接拼协议帧。
 2. 新主线中，控制器应尽量直接输出 `TAU_REF`。
 3. `SetRawRef()` 仅用于显式 bypass，不属于统一扭矩主线。
+4. `SetRef()` 仅用于 compatibility path，不得再作为新主线入口。
 4. `DJI` 默认转矩常数按输出轴扭矩解释：
    `GM6020 = 0.741 N·m/A`，`M3508 = 0.3 N·m/A`，`M2006 = 0.18 N·m/A`。
-5. `SMC` 的周期回退使用 `sample_period`，并应与 `MotorTask` 真实周期一致。
-6. 不再维护独立的 `control_effort.h` 或 `motor_effort_normalize.*` 文件，相关概念已压缩进电机层。
-7. 最终发送给电机的命令必须经过 adapter 构建。
+5. `DM MIT full / velocity-only / PVT` 仅用于兼容或扩展能力，不属于常规主线。
+6. `SMC` 的周期回退使用 `sample_period`，并应与 `MotorTask` 真实周期一致。
+7. 不再维护独立的 `control_effort.h` 或 `motor_effort_normalize.*` 文件，相关概念已压缩进电机层。
+8. 最终发送给电机的命令必须经过 adapter 构建。
+
+## 三层边界
+
+在当前主线中，应始终保持：
+
+```text
+Ref Manager / Arbiter
+-> Effort Controller / CalculateEffort
+-> Adapter / Protocol
+```
+
+其中 adapter 只负责“统一努力量 -> 执行器协议命令”的翻译，
+不负责参考仲裁、业务状态机或控制器求解。
 
 ## 示例
 

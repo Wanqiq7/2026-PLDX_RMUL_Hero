@@ -6,7 +6,7 @@
 
 #include "sysid_task.h"
 #include "bsp_dwt.h"
-#include "controller.h"
+#include "controllers/pid/pid_controller.h"
 #include "dji_motor.h"
 #include "dmmotor.h"
 #include "ins_task.h"
@@ -175,7 +175,8 @@ static void Gimbal_SystemID_RestoreMotors(void) {
         DJIMotorEnable(sysid_yaw_motor);
         DJIMotorChangeFeed(sysid_yaw_motor, ANGLE_LOOP, OTHER_FEED);
         DJIMotorChangeFeed(sysid_yaw_motor, SPEED_LOOP, OTHER_FEED);
-        sysid_yaw_motor->motor_controller.pid_ref = 0.0f;
+        /* 恢复到常规闭环后，使用兼容参考接口清零 reference carrier。 */
+        DJIMotorSetRef(sysid_yaw_motor, 0.0f);
     }
 
     if (sysid_pitch_motor != NULL) {
@@ -255,7 +256,8 @@ void Gimbal_SysIDTask(void) {
     sysid_data.step_input = Gimbal_SystemID_GenerateStepSignal();
 
     if (active_axis == SYSID_AXIS_YAW) {
-        sysid_yaw_motor->motor_controller.pid_ref = sysid_data.step_input;
+        /* Yaw 阶跃辨识显式走 raw-current bypass，不混入常规 SetEffort 主线。 */
+        DJIMotorSetRawRef(sysid_yaw_motor, sysid_data.step_input);
         sysid_data.motor_output = sysid_imu_data->Gyro[2];
         if (sysid_pitch_motor != NULL)
             Gimbal_SystemID_SetPitchMIT(sysid_cmd.pitch_ref,

@@ -9,7 +9,7 @@
 #include "memory.h"
 #include "stdlib.h"
 #include "string.h"
-#include "user_lib.h"
+#include "utils/math/user_lib.h"
 
 #include <math.h>
 
@@ -281,7 +281,10 @@ void DMMotorSetMode(DMMotorInstance *motor, DM_Mode_e mode) {
   }
 
   motor->drive_mode = mode;
-  motor->use_pvt_command_frame = (mode == DM_MODE_PVT);
+  if (mode != DM_MODE_PVT) {
+    /* 仅显式的 DMMotorSetPVT() 才能激活 PVT 命令路径。 */
+    motor->use_pvt_command_frame = 0;
+  }
 
   uint32_t prev_id = motor->motor_can_instance->txconf.StdId;
   motor->motor_can_instance->txconf.StdId = 0x7FF;

@@ -17,7 +17,6 @@
 #define DJI_MOTOR_H
 
 #include "bsp_can.h"
-#include "controller.h"
 #include "daemon.h"
 #include "motor_def.h"
 #include "stdint.h"
@@ -103,9 +102,22 @@ void DJIMotorSetRef(DJIMotorInstance *motor, float ref);
  *
  * @param motor 要设置的电机
  * @param effort 统一控制努力量；传入 NULL 时清空直通努力量
+ *
+ * @note  调用后会清空兼容参考 carrier (`pid_ref`)，避免主线与兼容态同时悬挂。
  */
 void DJIMotorSetEffort(DJIMotorInstance *motor,
                        const Controller_Effort_Output_s *effort);
+
+/**
+ * @brief 按当前反馈配置计算统一控制努力量
+ *
+ * @param motor 电机实例
+ * @param ref 参考输入（角度/速度等，由当前外环解释）
+ * @param effort 输出的统一控制努力量
+ * @return uint8_t 1-成功，0-失败
+ */
+uint8_t DJIMotorCalculateEffort(DJIMotorInstance *motor, float ref,
+                                Controller_Effort_Output_s *effort);
 
 /**
  * @brief 切换反馈的目标来源,如将角速度和角度的来源换为IMU(小陀螺模式常用)

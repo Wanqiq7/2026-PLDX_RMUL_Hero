@@ -4,7 +4,7 @@
 #include "dji_motor_adapter.h"
 #include "general_def.h"
 #include "robot_def.h"
-#include "user_lib.h"
+#include "utils/math/user_lib.h"
 
 static uint8_t idx = 0; // register idx,是该文件的全局电机索引,在注册时使用
 /* DJI电机的实例,此处仅保存指针,内存的分配将通过电机实例初始化时通过malloc()进行
@@ -365,6 +365,8 @@ void DJIMotorSetEffort(DJIMotorInstance *motor,
     return;
   }
 
+  /* 切入 SetEffort 主线时，显式清空兼容/旁路 carrier，避免旧状态悬挂。 */
+  motor->motor_controller.pid_ref = 0.0f;
   memset(&motor->motor_controller.ref_effort, 0,
          sizeof(motor->motor_controller.ref_effort));
   if (effort != NULL) {

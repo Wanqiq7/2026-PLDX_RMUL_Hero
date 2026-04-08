@@ -1,0 +1,217 @@
+{
+  "contract_version": "phase3-golden-v1",
+  "module": "power_controller",
+  "focus": "EnergyLoopControl",
+  "harness": "tests/harnesses/power_controller_sample_harness.c",
+  "samples": [
+    {
+      "sample_id": "energy-ref-cap-online-clamp-01",
+      "purpose": "冻结裁判在线且电容在线时，full/base clamp 交叉后的上限收敛结果。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "referee_online": 1,
+        "cap_online": 1,
+        "robot_level": 3,
+        "ref_limit_w": 100.0,
+        "buffer_energy": 42.0,
+        "cap_energy_percent": 180,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "allowed_power_w": 36.662787,
+        "upper_limit_w": 36.662787,
+        "lower_limit_w": 36.662787,
+        "ref_limit_w": 100.0,
+        "hard_limit_w": 400.0,
+        "buffer_feedback": 42.0,
+        "error_flags": 0,
+        "robot_level": 3
+      },
+      "tolerance": {
+        "allowed_power_w": 0.001,
+        "upper_limit_w": 0.001,
+        "lower_limit_w": 0.001,
+        "ref_limit_w": 0.001,
+        "hard_limit_w": 0.001,
+        "buffer_feedback": 0.001
+      },
+      "notes": "覆盖 referee online + cap online 分支。"
+    },
+    {
+      "sample_id": "energy-ref-cap-offline-01",
+      "purpose": "冻结裁判在线且电容离线时的硬上限退回行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "referee_online": 1,
+        "cap_online": 0,
+        "robot_level": 3,
+        "ref_limit_w": 100.0,
+        "buffer_energy": 55.0,
+        "cap_energy_percent": 0,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "allowed_power_w": 83.491804,
+        "upper_limit_w": 83.491804,
+        "lower_limit_w": 83.491804,
+        "ref_limit_w": 100.0,
+        "hard_limit_w": 100.0,
+        "buffer_feedback": 55.0,
+        "error_flags": 4,
+        "robot_level": 3
+      },
+      "tolerance": {
+        "allowed_power_w": 0.001,
+        "upper_limit_w": 0.001,
+        "lower_limit_w": 0.001,
+        "ref_limit_w": 0.001,
+        "hard_limit_w": 0.001,
+        "buffer_feedback": 0.001
+      },
+      "notes": "覆盖 referee online + cap offline 分支。"
+    },
+    {
+      "sample_id": "energy-ref-offline-cap-online-fallback-01",
+      "purpose": "冻结裁判离线后回退等级表，并切换到电容反馈的行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "referee_online": 0,
+        "cap_online": 1,
+        "robot_level": 1,
+        "ref_limit_w": 100.0,
+        "buffer_energy": 20.0,
+        "cap_energy_percent": 180,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "allowed_power_w": 30.0,
+        "upper_limit_w": 30.0,
+        "lower_limit_w": 30.0,
+        "ref_limit_w": 45.0,
+        "hard_limit_w": 345.0,
+        "buffer_feedback": 180.0,
+        "error_flags": 2,
+        "robot_level": 1
+      },
+      "tolerance": {
+        "allowed_power_w": 0.001,
+        "upper_limit_w": 0.001,
+        "lower_limit_w": 0.001,
+        "ref_limit_w": 0.001,
+        "hard_limit_w": 0.001,
+        "buffer_feedback": 0.001
+      },
+      "notes": "覆盖 referee offline + cap online 分支。"
+    },
+    {
+      "sample_id": "energy-dual-disconnect-conservative-01",
+      "purpose": "冻结裁判与电容双断连时的保守系数分支。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline" },
+      "input": {
+        "referee_online": 0,
+        "cap_online": 0,
+        "robot_level": 1,
+        "ref_limit_w": 100.0,
+        "buffer_energy": 20.0,
+        "cap_energy_percent": 0,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "allowed_power_w": 38.25,
+        "upper_limit_w": 38.25,
+        "lower_limit_w": 38.25,
+        "ref_limit_w": 45.0,
+        "hard_limit_w": 100.0,
+        "buffer_feedback": 20.0,
+        "error_flags": 6,
+        "robot_level": 1
+      },
+      "tolerance": {
+        "allowed_power_w": 0.001,
+        "upper_limit_w": 0.001,
+        "lower_limit_w": 0.001,
+        "ref_limit_w": 0.001,
+        "hard_limit_w": 0.001,
+        "buffer_feedback": 0.001
+      },
+      "notes": "覆盖 dual-disconnect conservative branch。"
+    },
+    {
+      "sample_id": "energy-level-fallback-seeded-lv3-01",
+      "purpose": "冻结 last_robot_level 已更新后，裁判断连按等级 3 查表回退的行为。",
+      "source": { "kind": "baseline-current-implementation", "detail": "helper mirror baseline with pre-step" },
+      "pre_steps": [
+        {
+          "referee_online": 1,
+          "robot_level": 3,
+          "ref_limit_w": 100.0,
+          "buffer_energy": 60.0,
+          "cap_online": 0,
+          "cap_energy_percent": 0,
+          "run_task_iterations": 1
+        }
+      ],
+      "input": {
+        "referee_online": 0,
+        "cap_online": 0,
+        "robot_level": 3,
+        "ref_limit_w": 100.0,
+        "buffer_energy": 48.0,
+        "cap_energy_percent": 0,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "allowed_power_w": 46.75,
+        "upper_limit_w": 46.75,
+        "lower_limit_w": 46.75,
+        "ref_limit_w": 55.0,
+        "hard_limit_w": 100.0,
+        "buffer_feedback": 48.0,
+        "error_flags": 6,
+        "robot_level": 3
+      },
+      "tolerance": {
+        "allowed_power_w": 0.001,
+        "upper_limit_w": 0.001,
+        "lower_limit_w": 0.001,
+        "ref_limit_w": 0.001,
+        "hard_limit_w": 0.001,
+        "buffer_feedback": 0.001
+      },
+      "notes": "单独验证 GetPowerLimitByLevel() fallback。"
+    },
+    {
+      "sample_id": "energy-ref-cap-online-high-buffer-01",
+      "purpose": "冻结高缓冲能量下上限抬升但仍受 clamp 约束的结果。",
+      "source": { "kind": "synthetic-boundary", "detail": "explicit high-buffer boundary sample" },
+      "input": {
+        "referee_online": 1,
+        "cap_online": 1,
+        "robot_level": 5,
+        "ref_limit_w": 90.0,
+        "buffer_energy": 70.0,
+        "cap_energy_percent": 210,
+        "run_task_iterations": 1
+      },
+      "expected_state": {
+        "allowed_power_w": 121.068917,
+        "upper_limit_w": 121.068917,
+        "lower_limit_w": 121.068917,
+        "ref_limit_w": 90.0,
+        "hard_limit_w": 390.0,
+        "buffer_feedback": 70.0,
+        "error_flags": 0,
+        "robot_level": 5
+      },
+      "tolerance": {
+        "allowed_power_w": 0.001,
+        "upper_limit_w": 0.001,
+        "lower_limit_w": 0.001,
+        "ref_limit_w": 0.001,
+        "hard_limit_w": 0.001,
+        "buffer_feedback": 0.001
+      },
+      "notes": "覆盖高 buffer 下的 clamp crossing 结果。"
+    }
+  ]
+}

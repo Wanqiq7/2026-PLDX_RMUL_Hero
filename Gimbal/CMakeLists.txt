@@ -15,8 +15,7 @@ set(CMAKE_BUILD_TYPE Debug) # Debug Release RelWithDebInfo MinSizeRel
 # board specific settings, arch/fpu/instruction
 set(MCU_FLAGS -mcpu=cortex-m4 -mthumb -mthumb-interwork -mfloat-abi=hard -mfpu=fpv4-sp-d16)
 set(LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/STM32F407IGHx_FLASH.ld") # 指定链接脚本
-set(DSP_NAME "libCMSISDSP.a") # 指定DSP库名称
-link_directories(${CMAKE_SOURCE_DIR}/Middlewares/ST/ARM/DSP/Lib)
+set(DSP_LIB_PATH "${CMAKE_SOURCE_DIR}/Middlewares/ST/ARM/DSP/Lib/libCMSISDSP.a")
 
 # Generic compiler settings for optimization and basic link lib
 add_compile_options(-pipe ${MCU_FLAGS} -Wall -fmessage-length=0 # basic options
@@ -37,26 +36,74 @@ add_definitions(
     ) # need -D<macro> to define macro
 
 # add inc
-# 递归包含头文件的函数
-function(include_sub_directories_recursively root_dir)
-    if (IS_DIRECTORY ${root_dir})               # 当前路径是一个目录吗，是的话就加入到包含目录
-        message("include dir: " ${root_dir})
-        include_directories(${root_dir})
-    endif()
+# 显式声明 public include 根，避免递归暴露整仓目录结构
+set(COMMON_INCLUDE_DIRS
+    ${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Include
+    ${CMAKE_SOURCE_DIR}/Drivers/CMSIS/Device/ST/STM32F4xx/Include
+    ${CMAKE_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Inc
+    ${CMAKE_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
+    ${CMAKE_SOURCE_DIR}/Middlewares/ST/ARM/DSP/Inc
+    ${CMAKE_SOURCE_DIR}/Middlewares/ST/ARM/DSP/Include
+    ${CMAKE_SOURCE_DIR}/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc
+    ${CMAKE_SOURCE_DIR}/Middlewares/ST/STM32_USB_Device_Library/Core/Inc
+    ${CMAKE_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS
+    ${CMAKE_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/include
+    ${CMAKE_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F
+    ${CMAKE_SOURCE_DIR}/Middlewares/Third_Party/SEGGER/Config
+    ${CMAKE_SOURCE_DIR}/Middlewares/Third_Party/SEGGER/RTT
+    ${CMAKE_SOURCE_DIR}/Inc
+    ${CMAKE_SOURCE_DIR}/bsp/adc
+    ${CMAKE_SOURCE_DIR}/bsp/can
+    ${CMAKE_SOURCE_DIR}/bsp/dwt
+    ${CMAKE_SOURCE_DIR}/bsp/flash
+    ${CMAKE_SOURCE_DIR}/bsp/gpio
+    ${CMAKE_SOURCE_DIR}/bsp/iic
+    ${CMAKE_SOURCE_DIR}/bsp/log
+    ${CMAKE_SOURCE_DIR}/bsp/pwm
+    ${CMAKE_SOURCE_DIR}/bsp/spi
+    ${CMAKE_SOURCE_DIR}/bsp/usart
+    ${CMAKE_SOURCE_DIR}/bsp/usb
+    ${CMAKE_SOURCE_DIR}/modules/alarm
+    ${CMAKE_SOURCE_DIR}/modules/algorithm
+    ${CMAKE_SOURCE_DIR}/modules/BMI088
+    ${CMAKE_SOURCE_DIR}/modules/can_comm
+    ${CMAKE_SOURCE_DIR}/modules/daemon
+    ${CMAKE_SOURCE_DIR}/modules/imu
+    ${CMAKE_SOURCE_DIR}/modules/message_center
+    ${CMAKE_SOURCE_DIR}/modules/motor
+    ${CMAKE_SOURCE_DIR}/modules/motor/DJImotor
+    ${CMAKE_SOURCE_DIR}/modules/motor/DMmotor
+    ${CMAKE_SOURCE_DIR}/modules/motor/servo_motor
+    ${CMAKE_SOURCE_DIR}/modules/motor/step_motor
+    ${CMAKE_SOURCE_DIR}/modules/referee
+)
 
-    file(GLOB ALL_SUB RELATIVE ${root_dir} ${root_dir}/*) # 获得当前目录下的所有文件，让如ALL_SUB列表中
-    foreach(sub ${ALL_SUB})
-        if (IS_DIRECTORY ${root_dir}/${sub})
-            include_sub_directories_recursively(${root_dir}/${sub}) # 对子目录递归调用，包含
-        endif()
-    endforeach()
-endfunction()
-include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/Drivers)
-include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/Middlewares)
-include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/bsp)
-include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/modules)
-include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/application)
-include_sub_directories_recursively(${CMAKE_SOURCE_DIR}/Inc)
+set(BOARD_INCLUDE_DIRS
+    ${CMAKE_SOURCE_DIR}/application/cmd
+    ${CMAKE_SOURCE_DIR}/application/gimbal
+    ${CMAKE_SOURCE_DIR}/application/shoot
+    ${CMAKE_SOURCE_DIR}/application/sysid
+    ${CMAKE_SOURCE_DIR}/application/vision
+    ${CMAKE_SOURCE_DIR}/modules/remote
+    ${CMAKE_SOURCE_DIR}/modules/vision_comm
+    ${CMAKE_SOURCE_DIR}/modules/vtm_input
+)
+
+# audit:root-level-public-include-exceptions 根层 public header 例外白名单；新增项必须同步更新 tests/cmake_explicit_include_regression.ps1 并补充审计说明。
+set(ROOT_LEVEL_PUBLIC_INCLUDE_EXCEPTIONS
+    ${CMAKE_SOURCE_DIR}/bsp         # audit:bsp-root-public 保留板级驱动根层 public header 入口，例如 bsp_can.h、bsp_usart.h。
+    ${CMAKE_SOURCE_DIR}/modules     # audit:modules-root-public 保留模块聚合根层 public header 入口，例如 referee.h、can_comm.h。
+    ${CMAKE_SOURCE_DIR}/application # audit:application-root-public 保留应用层根层 public header 入口，例如 robot_def.h、robot_task.h。
+)
+
+set(APPLICATION_SOURCES
+    application/robot.c
+    application/cmd/robot_cmd.c
+    application/gimbal/gimbal.c
+    application/shoot/shoot.c
+    application/sysid/sysid_task.c
+    application/vision/vision.c
+)
 
 # add source, only surfix .c
 # 递归收集 bsp/modules/application 下新增源文件,包括 bsp/usart/bsp_usart_async.c
@@ -66,11 +113,11 @@ file(GLOB_RECURSE SOURCES
     "Middlewares/*.c"
     "bsp/*.c"
     "modules/*.c"
-    "application/*.c"
 )
+list(APPEND SOURCES ${APPLICATION_SOURCES})
 
 # 示例文件不参与正式固件构建，避免占位实现污染主 target
-list(FILTER SOURCES EXCLUDE REGEX "modules/algorithm/LQR_Example\\.c$")
+list(FILTER SOURCES EXCLUDE REGEX "modules/algorithm/.*/LQR_Example\\.c$")
 
 # 汇编文件路径
 # ENABLE_LANGUAGE(ASM)
@@ -98,8 +145,17 @@ endif ()
 
 # build binary and hex file
 add_executable(${PROJECT_NAME}  ${SOURCES} ${ASM_SOURCES} ${LINKER_SCRIPT})
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${COMMON_INCLUDE_DIRS}
+    ${BOARD_INCLUDE_DIRS}
+    ${ROOT_LEVEL_PUBLIC_INCLUDE_EXCEPTIONS}
+)
 set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".elf")
-target_link_libraries(${PROJECT_NAME} ${DSP_NAME} m) # link DSP lib and math lib
+if (EXISTS "${DSP_LIB_PATH}")
+    target_link_libraries(${PROJECT_NAME} "${DSP_LIB_PATH}" m) # link DSP lib and math lib
+else ()
+    message(FATAL_ERROR "Missing CMSIS-DSP static library: ${DSP_LIB_PATH}")
+endif ()
 
 add_custom_command(
     TARGET ${PROJECT_NAME} POST_BUILD

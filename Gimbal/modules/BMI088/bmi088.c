@@ -1,6 +1,6 @@
 #include "bmi088_regNdef.h"
 #include "bmi088.h"
-#include "user_lib.h"
+#include "utils/math/user_lib.h"
 #include "daemon.h"
 
 //static DaemonInstance *bmi088_daemon_instance;

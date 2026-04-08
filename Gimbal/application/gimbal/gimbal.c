@@ -1,18 +1,20 @@
 #include "gimbal.h"
-#include "arm_math_compat.h"
+#include "utils/math/arm_math_compat.h"
 #include "bmi088.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
-#include "controller.h" // 包含LQR控制器
+#include "controllers/pid/pid_controller.h"
 #include "dji_motor.h"
 #include "dmmotor.h"
 #include "general_def.h"
+#include "controllers/lqr/lqr_controller.h"
+#include "controllers/reference/gimbal_ref_manager.h"
 #include "ins_task.h"
 #include "main.h"
 #include "message_center.h"
 #include "robot_def.h"
 #include "sysid_task.h"
-#include "user_lib.h"
+#include "utils/math/user_lib.h"
 #include <math.h>
 
 /* ============================================================
@@ -84,8 +86,69 @@ static Subscriber_t *vision_sub;
 static Gimbal_Upload_Data_s gimbal_feedback_data;
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;
 static Vision_Upload_Data_s vision_data_recv;
-static float yaw_vision_rate_ff_rad_s = 0.0f;
-static float pitch_vision_rate_ff_rad_s = 0.0f;
+static Gimbal_Ref_Manager_s gimbal_ref_manager;
+static float yaw_vision_rate_feedforward_rad_s = 0.0f;
+static float pitch_vision_rate_feedforward_rad_s = 0.0f;
+
+static void BuildGimbalRefInput(Gimbal_Ref_Input_s *ref_input) {
+  if (ref_input == NULL) {
+    return;
+  }
+
+  memset(ref_input, 0, sizeof(*ref_input));
+  ref_input->manual_yaw_ref_rad = gimbal_cmd_recv.yaw;
+  ref_input->manual_pitch_ref_rad = gimbal_cmd_recv.pitch;
+  ref_input->pitch_min_limit_rad = PITCH_MIN_ANGLE * DEG_TO_RAD;
+  ref_input->pitch_max_limit_rad = PITCH_MAX_ANGLE * DEG_TO_RAD;
+  ref_input->autoaim_mode =
+      (gimbal_cmd_recv.gimbal_mode == GIMBAL_AUTOAIM_MODE) ? 1U : 0U;
+  ref_input->vision_takeover = vision_data_recv.vision_takeover;
+  ref_input->vision_yaw_ref_rad = vision_data_recv.yaw_ref_rad;
+  ref_input->vision_pitch_ref_rad = vision_data_recv.pitch_ref_rad;
+  ref_input->vision_yaw_rate_ff_rad_s = vision_data_recv.yaw_rate_ff_rad_s;
+  ref_input->vision_pitch_rate_ff_rad_s = vision_data_recv.pitch_rate_ff_rad_s;
+}
+
+static void RunYawMainline(Controller_Type_e controller_type,
+                           float yaw_ref_rad,
+                           Controller_Effort_Output_s *yaw_effort) {
+  if (yaw_motor == NULL || yaw_effort == NULL) {
+    return;
+  }
+
+  DJIMotorEnable(yaw_motor);
+  yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
+  yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
+  DJIMotorChangeController(yaw_motor, controller_type);
+  if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, yaw_effort)) {
+    DJIMotorSetEffort(yaw_motor, yaw_effort);
+  }
+}
+
+static void RunPitchMainline(float pitch_ref_rad,
+                             Controller_Effort_Output_s *pitch_effort) {
+  if (pitch_motor == NULL || pitch_effort == NULL) {
+    return;
+  }
+
+  DMMotorEnable(pitch_motor);
+  if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
+                                   pitch_effort)) {
+    DMMotorSetEffort(pitch_motor, pitch_effort);
+  }
+}
+
+static void RunGimbalMainline(Controller_Type_e yaw_controller_type,
+                              const Gimbal_Ref_Output_s *ref_output,
+                              Controller_Effort_Output_s *yaw_effort,
+                              Controller_Effort_Output_s *pitch_effort) {
+  if (ref_output == NULL || yaw_effort == NULL || pitch_effort == NULL) {
+    return;
+  }
+
+  RunYawMainline(yaw_controller_type, ref_output->yaw_ref_rad, yaw_effort);
+  RunPitchMainline(ref_output->pitch_ref_rad, pitch_effort);
+}
 
 void GimbalInit() {
   gimba_IMU_data = INS_Init();
@@ -128,7 +191,7 @@ void GimbalInit() {
                   {
                       .sample_period = ROBOT_CTRL_PERIOD_S,
                   },
-              .speed_feedforward_ptr = &yaw_vision_rate_ff_rad_s,
+              .speed_feedforward_ptr = &yaw_vision_rate_feedforward_rad_s,
               .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
           },
@@ -187,7 +250,7 @@ void GimbalInit() {
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 1.5f,
                   },
-              .speed_feedforward_ptr = &pitch_vision_rate_ff_rad_s,
+              .speed_feedforward_ptr = &pitch_vision_rate_feedforward_rad_s,
               .other_angle_feedback_ptr = &gimba_IMU_data->Pitch_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[0],
           },
@@ -230,10 +293,12 @@ void GimbalInit() {
   };
   yaw_motor = DJIMotorInit(&yaw_config);
   pitch_motor = DMMotorInit(&pitch_config);
-  pitch_motor->external_speed_feedforward_ptr = &pitch_vision_rate_ff_rad_s;
+  pitch_motor->external_speed_feedforward_ptr =
+      &pitch_vision_rate_feedforward_rad_s;
   DMMotorSetMode(pitch_motor, DM_MODE_MIT);
   DMMotorEnable(pitch_motor);
   DMMotorControlInit();
+  GimbalRefManagerInit(&gimbal_ref_manager);
 
   gimbal_pub = RegisterPublisher("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
   gimbal_sub = RegisterSubscriber("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
@@ -251,19 +316,17 @@ void GimbalTask() {
 #endif
   Controller_Effort_Output_s yaw_effort = {0};
   Controller_Effort_Output_s pitch_effort = {0};
+  Gimbal_Ref_Input_s ref_input = {0};
+  Gimbal_Ref_Output_s ref_output = {0};
 
   SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
   SubGetMessage(vision_sub, &vision_data_recv);
 
-  float yaw_ref_rad = gimbal_cmd_recv.yaw;
-  float pitch_ref_rad = gimbal_cmd_recv.pitch;
-  yaw_vision_rate_ff_rad_s = 0.0f;
-  pitch_vision_rate_ff_rad_s = 0.0f;
+  BuildGimbalRefInput(&ref_input);
+  GimbalRefManagerStep(&gimbal_ref_manager, &ref_input, &ref_output);
 
-  const uint8_t autoaim_mode =
-      (gimbal_cmd_recv.gimbal_mode == GIMBAL_AUTOAIM_MODE);
-  const uint8_t vision_takeover =
-      (autoaim_mode && vision_data_recv.vision_takeover);
+  yaw_vision_rate_feedforward_rad_s = ref_output.yaw_rate_ff_rad_s;
+  pitch_vision_rate_feedforward_rad_s = ref_output.pitch_rate_ff_rad_s;
 
   switch (gimbal_cmd_recv.gimbal_mode) {
   case GIMBAL_ZERO_FORCE: {
@@ -272,62 +335,16 @@ void GimbalTask() {
     break;
   }
   case GIMBAL_GYRO_MODE: {
-    DJIMotorEnable(yaw_motor);
-    yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
-    yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
-    DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
-    if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
-      DJIMotorSetEffort(yaw_motor, &yaw_effort);
-    }
-    DMMotorEnable(pitch_motor);
-    if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
-                                     &pitch_effort)) {
-      DMMotorSetEffort(pitch_motor, &pitch_effort);
-    }
+    RunGimbalMainline(CONTROLLER_PID, &ref_output, &yaw_effort, &pitch_effort);
     break;
   }
   case GIMBAL_AUTOAIM_MODE: {
-    // 自瞄模式：视觉仅提供参考与前馈，不再直接旁路驱动电机
-    DJIMotorEnable(yaw_motor);
-
-    if (vision_takeover) {
-      yaw_ref_rad = vision_data_recv.yaw_ref_rad;
-      yaw_vision_rate_ff_rad_s = vision_data_recv.yaw_rate_ff_rad_s;
-      pitch_ref_rad = vision_data_recv.pitch_ref_rad;
-      pitch_vision_rate_ff_rad_s = vision_data_recv.pitch_rate_ff_rad_s;
-      yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
-      yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
-      DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
-    }
-    if (!vision_takeover) {
-      yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
-      yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
-      DJIMotorChangeController(yaw_motor, CONTROLLER_PID);
-    }
-    if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
-      DJIMotorSetEffort(yaw_motor, &yaw_effort);
-    }
-
-    DMMotorEnable(pitch_motor);
-    if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
-                                     &pitch_effort)) {
-      DMMotorSetEffort(pitch_motor, &pitch_effort);
-    }
+    // 自瞄模式：参考仲裁由 gimbal_ref_manager 统一处理
+    RunGimbalMainline(CONTROLLER_PID, &ref_output, &yaw_effort, &pitch_effort);
     break;
   }
   case GIMBAL_LQR_MODE: {
-    DJIMotorEnable(yaw_motor);
-    yaw_motor->motor_settings.close_loop_type = SPEED_LOOP | ANGLE_LOOP;
-    yaw_motor->motor_settings.outer_loop_type = ANGLE_LOOP;
-    DJIMotorChangeController(yaw_motor, CONTROLLER_LQR);
-    if (DJIMotorCalculateEffort(yaw_motor, yaw_ref_rad, &yaw_effort)) {
-      DJIMotorSetEffort(yaw_motor, &yaw_effort);
-    }
-    DMMotorEnable(pitch_motor);
-    if (DMMotorCalculateTorqueEffort(pitch_motor, pitch_ref_rad, 0.0f,
-                                     &pitch_effort)) {
-      DMMotorSetEffort(pitch_motor, &pitch_effort);
-    }
+    RunGimbalMainline(CONTROLLER_LQR, &ref_output, &yaw_effort, &pitch_effort);
     break;
   }
   case GIMBAL_SYS_ID_CHIRP: {
@@ -337,8 +354,8 @@ void GimbalTask() {
     SysID_Ctrl_Cmd_s sysid_cmd = {
         .enable = 1,
         .axis = SYSID_AXIS_YAW,
-        .yaw_ref = gimbal_cmd_recv.yaw,
-        .pitch_ref = gimbal_cmd_recv.pitch,
+        .yaw_ref = ref_output.yaw_ref_rad,
+        .pitch_ref = ref_output.pitch_ref_rad,
     };
     PubPushMessage(sysid_pub, &sysid_cmd);
     break;
