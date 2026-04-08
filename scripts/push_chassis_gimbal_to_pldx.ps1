@@ -1,11 +1,11 @@
-$ErrorActionPreference = 'Stop'
-
 param(
     [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$TargetRepoUrl = '',
     [string]$TempRepoRoot = '',
     [string]$TargetBranch = 'main'
 )
+
+$ErrorActionPreference = 'Stop'
 
 function Invoke-Git {
     param(
