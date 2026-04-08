@@ -35,6 +35,7 @@ desktop.ini
 
 # Planning / session scratch files
 /.merge-backup/
+/.push-temp/
 /findings.md
 /progress.md
 /tmp_*.ps1
