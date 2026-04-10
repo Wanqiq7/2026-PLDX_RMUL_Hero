@@ -44,6 +44,8 @@ void GimbalRefManagerStep(Gimbal_Ref_Manager_s *manager,
   memset(output, 0, sizeof(*output));
   output->yaw_ref_rad = input->manual_yaw_ref_rad;
   output->pitch_ref_rad = manual_pitch_ref_rad;
+  output->yaw_rate_ff_rad_s = input->manual_yaw_rate_ff_rad_s;
+  output->pitch_rate_ff_rad_s = input->manual_pitch_rate_ff_rad_s;
 
   if (!manager->vision_takeover_latched && requested_takeover) {
     /* 进入视觉接管的当前拍，先冻结上一拍参考，避免边沿跳变。 */
@@ -51,6 +53,8 @@ void GimbalRefManagerStep(Gimbal_Ref_Manager_s *manager,
       output->yaw_ref_rad = manager->last_yaw_ref_rad;
       output->pitch_ref_rad = manager->last_pitch_ref_rad;
     }
+    output->yaw_rate_ff_rad_s = 0.0f;
+    output->pitch_rate_ff_rad_s = 0.0f;
     output->vision_takeover = 1U;
     output->transition = GIMBAL_REF_TRANSITION_VISION_ENTER;
   } else if (manager->vision_takeover_latched && !requested_takeover) {
@@ -59,6 +63,8 @@ void GimbalRefManagerStep(Gimbal_Ref_Manager_s *manager,
       output->yaw_ref_rad = manager->last_yaw_ref_rad;
       output->pitch_ref_rad = manager->last_pitch_ref_rad;
     }
+    output->yaw_rate_ff_rad_s = 0.0f;
+    output->pitch_rate_ff_rad_s = 0.0f;
     output->vision_takeover = 0U;
     output->transition = GIMBAL_REF_TRANSITION_VISION_EXIT;
   } else if (requested_takeover) {

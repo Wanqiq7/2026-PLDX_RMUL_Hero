@@ -196,6 +196,12 @@ typedef enum {
   CHASSIS_FOLLOW_GIMBAL_YAW, // 跟随模式，底盘叠加角度环控制
 } chassis_mode_e;
 
+typedef enum {
+  CHASSIS_SAFETY_STATUS_NONE = 0x00U,
+  CHASSIS_SAFETY_STATUS_DEAD = 0x01U,
+  CHASSIS_SAFETY_STATUS_READY = 0x02U,
+} chassis_safety_status_e;
+
 // 云台模式设置
 typedef enum {
   GIMBAL_ZERO_FORCE = 0,
@@ -294,7 +300,8 @@ typedef struct {
   // 后续增加底盘的真实速度
   // float real_vx;
   // float real_vy;
-  // float real_wz;
+  float real_wz; // 底盘实际角速度 [rad/s]
+  uint8_t chassis_safety_status; // bit0-阵亡 bit1-底盘ready
 
   uint8_t referee_online;      // 裁判系统在线标志(1:在线,0:离线)
   uint8_t rest_heat;           // 剩余枪口热量
@@ -340,6 +347,8 @@ typedef struct {
   uint16_t barrel_heat_limit;
   uint16_t barrel_cooling_value;
   float bullet_speed_limit;
+  float real_wz; // 底盘实际角速度 [rad/s]
+  uint8_t chassis_safety_status;
 } Chassis_Feed_Fast_Pkt_s;
 
 typedef struct {

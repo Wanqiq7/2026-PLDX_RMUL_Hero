@@ -27,12 +27,14 @@ function Assert-NoPattern {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $gimbalTask = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.c'
 $robotDef = Join-Path $repoRoot 'Gimbal\application\robot_def.h'
-$visionCtrl = Join-Path $repoRoot 'Gimbal\modules\algorithm\vision_control.h'
-$refMgrHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\gimbal_ref_manager.h'
+$visionCtrl = Join-Path $repoRoot 'Gimbal\modules\algorithm\controllers\domain\vision_control.h'
+$refMgrHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\controllers\reference\gimbal_ref_manager.h'
 $gimbalDoc = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.md'
 
-Assert-Pattern $gimbalTask 'yaw_vision_rate_feedforward_rad_s' 'Gimbal app is missing the full feedforward naming for yaw.'
-Assert-Pattern $gimbalTask 'pitch_vision_rate_feedforward_rad_s' 'Gimbal app is missing the full feedforward naming for pitch.'
+Assert-Pattern $gimbalTask 'yaw_ref_rate_feedforward_rad_s' 'Gimbal app is missing the reference-layer feedforward naming for yaw.'
+Assert-Pattern $gimbalTask 'pitch_ref_rate_feedforward_rad_s' 'Gimbal app is missing the reference-layer feedforward naming for pitch.'
+Assert-NoPattern $gimbalTask 'yaw_vision_rate_feedforward_rad_s' 'Gimbal app still uses vision-specific naming for the yaw reference-layer feedforward.'
+Assert-NoPattern $gimbalTask 'pitch_vision_rate_feedforward_rad_s' 'Gimbal app still uses vision-specific naming for the pitch reference-layer feedforward.'
 Assert-NoPattern $gimbalTask 'yaw_vision_rate_ff_rad_s' 'Gimbal app still uses abbreviated ff naming for local feedforward state.'
 Assert-NoPattern $gimbalTask 'pitch_vision_rate_ff_rad_s' 'Gimbal app still uses abbreviated ff naming for local feedforward state.'
 

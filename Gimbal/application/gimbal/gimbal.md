@@ -76,7 +76,7 @@ Pitch_ref / Pitch_feedback / Gyro_feedback
 因此 `gimbal_ref_manager` 负责：
 
 1. 手操参考与视觉参考选择
-2. 视觉速度前馈透传
+2. 当前模式速度前馈透传
 3. Pitch 参考限位
 4. 接管状态输出
 

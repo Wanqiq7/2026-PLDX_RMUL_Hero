@@ -168,6 +168,45 @@ static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb,
 static PIDInstance chassis_follow_pid; // 底盘跟随云台PID控制器
 static uint32_t chassis_last_telemetry_ms = 0;
 static const uint32_t CHASSIS_TELEMETRY_PERIOD_MS = 500U;
+#define CHASSIS_ALL_WHEELS_STABLE_MS 150U
+
+typedef enum {
+  CHASSIS_RUNTIME_HOLD = 0,
+  CHASSIS_RUNTIME_WAIT_STABLE = 1,
+  CHASSIS_RUNTIME_READY = 2,
+} chassis_runtime_state_e;
+
+typedef enum {
+  CHASSIS_LOCAL_INHIBIT_NONE = 0,
+  CHASSIS_LOCAL_INHIBIT_LINK_LOST = 1,
+  CHASSIS_LOCAL_INHIBIT_DEAD = 2,
+  CHASSIS_LOCAL_INHIBIT_WHEEL_OFFLINE = 3,
+  CHASSIS_LOCAL_INHIBIT_WAIT_STABLE = 4,
+} chassis_local_inhibit_reason_e;
+
+typedef struct {
+  uint32_t now_ms;
+  uint8_t comm_online;
+  uint8_t referee_online;
+  uint8_t wheel_online_mask;
+  uint8_t robot_dead;
+} ChassisSafetyInput_s;
+
+typedef struct {
+  uint8_t should_hold;
+  uint8_t chassis_ready;
+  uint8_t chassis_safety_status;
+  uint8_t local_inhibit_reason;
+} ChassisSafetyResult_s;
+
+static chassis_runtime_state_e chassis_runtime_state = CHASSIS_RUNTIME_HOLD;
+static uint32_t chassis_all_online_since_ms = 0U;
+static uint8_t chassis_last_dead_state = 0xFFU;
+static uint8_t chassis_last_ready_state = 0xFFU;
+static uint8_t chassis_last_inhibit_reason = 0xFFU;
+static uint8_t chassis_last_wheel_online_mask = 0xFFU;
+
+static void ResetFollowPidRuntimeState(void);
 
 static void ApplyMotorTauRef(DJIMotorInstance *motor, float tau_ref_nm) {
   Controller_Effort_Output_s effort = {
@@ -186,6 +225,154 @@ static void ApplyWheelTauRef(const float wheel_tau_ref[4]) {
   ApplyMotorTauRef(motor_lf, wheel_tau_ref[1]); // LF
   ApplyMotorTauRef(motor_lb, wheel_tau_ref[2]); // LB
   ApplyMotorTauRef(motor_rb, wheel_tau_ref[3]); // RB
+}
+
+static uint8_t BuildWheelOnlineMask(void) {
+  uint8_t mask = 0U;
+
+  if (motor_rf != NULL && motor_rf->daemon != NULL &&
+      DaemonIsOnline(motor_rf->daemon)) {
+    mask |= 0x01U; // bit0 = RF
+  }
+  if (motor_lf != NULL && motor_lf->daemon != NULL &&
+      DaemonIsOnline(motor_lf->daemon)) {
+    mask |= 0x02U; // bit1 = LF
+  }
+  if (motor_lb != NULL && motor_lb->daemon != NULL &&
+      DaemonIsOnline(motor_lb->daemon)) {
+    mask |= 0x04U; // bit2 = LB
+  }
+  if (motor_rb != NULL && motor_rb->daemon != NULL &&
+      DaemonIsOnline(motor_rb->daemon)) {
+    mask |= 0x08U; // bit3 = RB
+  }
+
+  return mask;
+}
+
+static uint8_t IsRobotDeadLocal(uint8_t referee_online) {
+  if (!referee_online || referee_data == NULL) {
+    return 0U;
+  }
+
+  return (referee_data->GameRobotState.current_HP == 0U ||
+          referee_data->GameRobotState.power_management_chassis_output == 0U)
+             ? 1U
+             : 0U;
+}
+
+static void BuildChassisSafetyInput(ChassisSafetyInput_s *input, uint32_t now_ms,
+                                    uint8_t comm_online,
+                                    uint8_t referee_online) {
+  if (input == NULL) {
+    return;
+  }
+
+  memset(input, 0, sizeof(*input));
+  input->now_ms = now_ms;
+  input->comm_online = comm_online;
+  input->referee_online = referee_online;
+  input->wheel_online_mask = BuildWheelOnlineMask();
+  input->robot_dead = IsRobotDeadLocal(referee_online);
+}
+
+static void StepChassisSafetyGate(const ChassisSafetyInput_s *input,
+                                  ChassisSafetyResult_s *result) {
+  uint8_t all_wheels_online = 0U;
+
+  if (input == NULL || result == NULL) {
+    return;
+  }
+
+  memset(result, 0, sizeof(*result));
+  all_wheels_online = (input->wheel_online_mask == 0x0FU) ? 1U : 0U;
+
+  if (!input->comm_online) {
+    chassis_runtime_state = CHASSIS_RUNTIME_HOLD;
+    chassis_all_online_since_ms = 0U;
+    result->local_inhibit_reason = CHASSIS_LOCAL_INHIBIT_LINK_LOST;
+  } else if (input->robot_dead) {
+    chassis_runtime_state = CHASSIS_RUNTIME_HOLD;
+    chassis_all_online_since_ms = 0U;
+    result->local_inhibit_reason = CHASSIS_LOCAL_INHIBIT_DEAD;
+  } else if (!all_wheels_online) {
+    chassis_runtime_state = CHASSIS_RUNTIME_HOLD;
+    chassis_all_online_since_ms = 0U;
+    result->local_inhibit_reason = CHASSIS_LOCAL_INHIBIT_WHEEL_OFFLINE;
+  } else if (chassis_runtime_state == CHASSIS_RUNTIME_READY) {
+    result->local_inhibit_reason = CHASSIS_LOCAL_INHIBIT_NONE;
+  } else {
+    if (chassis_runtime_state != CHASSIS_RUNTIME_WAIT_STABLE) {
+      chassis_runtime_state = CHASSIS_RUNTIME_WAIT_STABLE;
+      chassis_all_online_since_ms = input->now_ms;
+    }
+
+    result->local_inhibit_reason = CHASSIS_LOCAL_INHIBIT_WAIT_STABLE;
+    if ((input->now_ms - chassis_all_online_since_ms) >=
+        CHASSIS_ALL_WHEELS_STABLE_MS) {
+      chassis_runtime_state = CHASSIS_RUNTIME_READY;
+      result->local_inhibit_reason = CHASSIS_LOCAL_INHIBIT_NONE;
+    }
+  }
+
+  result->chassis_ready =
+      (chassis_runtime_state == CHASSIS_RUNTIME_READY) ? 1U : 0U;
+  result->should_hold = result->chassis_ready ? 0U : 1U;
+  result->chassis_safety_status = CHASSIS_SAFETY_STATUS_NONE;
+  if (input->robot_dead) {
+    result->chassis_safety_status |= CHASSIS_SAFETY_STATUS_DEAD;
+  }
+  if (result->chassis_ready) {
+    result->chassis_safety_status |= CHASSIS_SAFETY_STATUS_READY;
+  }
+}
+
+static uint8_t ShouldHoldChassisControl(const Chassis_Ctrl_Cmd_s *cmd,
+                                        const ChassisSafetyResult_s *result) {
+  const uint8_t command_zero_force =
+      (cmd != NULL && cmd->chassis_mode == CHASSIS_ZERO_FORCE) ? 1U : 0U;
+  const uint8_t local_hold = (result != NULL) ? result->should_hold : 1U;
+
+  return command_zero_force || local_hold;
+}
+
+static void HoldChassisOutputs(void) {
+  DJIMotorStop(motor_lf);
+  DJIMotorStop(motor_rf);
+  DJIMotorStop(motor_lb);
+  DJIMotorStop(motor_rb);
+  ApplyMotorTauRef(motor_lf, 0.0f);
+  ApplyMotorTauRef(motor_rf, 0.0f);
+  ApplyMotorTauRef(motor_lb, 0.0f);
+  ApplyMotorTauRef(motor_rb, 0.0f);
+  ResetFollowPidRuntimeState();
+  ChassisForceControlReset();
+}
+
+static void ApplyChassisSafetyFeedback(const ChassisSafetyResult_s *result) {
+  chassis_feedback_data.chassis_safety_status =
+      (result != NULL) ? result->chassis_safety_status
+                       : CHASSIS_SAFETY_STATUS_NONE;
+}
+
+static void LogChassisSafetyTransition(const ChassisSafetyResult_s *result,
+                                       const ChassisSafetyInput_s *input) {
+  if (result == NULL || input == NULL) {
+    return;
+  }
+
+  if (input->robot_dead != chassis_last_dead_state ||
+      result->chassis_ready != chassis_last_ready_state ||
+      result->local_inhibit_reason != chassis_last_inhibit_reason ||
+      input->wheel_online_mask != chassis_last_wheel_online_mask) {
+    LOGWARNING("[chassis-safe] dead=%u ready=%u wheel_mask=0x%02X reason=%u",
+               input->robot_dead, result->chassis_ready,
+               input->wheel_online_mask, result->local_inhibit_reason);
+    chassis_last_dead_state = input->robot_dead;
+    chassis_last_ready_state = result->chassis_ready;
+    chassis_last_inhibit_reason = result->local_inhibit_reason;
+    chassis_last_wheel_online_mask = input->wheel_online_mask;
+  }
 }
 
 #if POWER_CONTROLLER_ENABLE
@@ -540,6 +727,9 @@ void ChassisTask() {
   SuperCap_Rx_Data_s cap_rx_data = {0};
   uint8_t cap_online = 0U;
   uint16_t ui_cap_energy = 0U;
+  uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
+  ChassisSafetyInput_s safety_input = {0};
+  ChassisSafetyResult_s safety_result = {0};
 
   if (cap != NULL) {
     cap_rx_data = SuperCapGetData(cap);
@@ -577,19 +767,10 @@ void ChassisTask() {
   chassis_cmd_recv.vy *= chassis_config.rc.max_linear_speed;
   // 注意: wz(角速度)由底盘根据模式自动设定，不需要在这里处理
 
-  const uint8_t control_disabled =
-      (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) ? 1U : 0U;
-  if (control_disabled) {
-    DJIMotorStop(motor_lf);
-    DJIMotorStop(motor_rf);
-    DJIMotorStop(motor_lb);
-    DJIMotorStop(motor_rb);
-    ApplyMotorTauRef(motor_lf, 0.0f);
-    ApplyMotorTauRef(motor_rf, 0.0f);
-    ApplyMotorTauRef(motor_lb, 0.0f);
-    ApplyMotorTauRef(motor_rb, 0.0f);
-    ResetFollowPidRuntimeState();
-    ChassisForceControlReset();
+  BuildChassisSafetyInput(&safety_input, now_ms, comm_online, referee_online);
+  StepChassisSafetyGate(&safety_input, &safety_result);
+  if (ShouldHoldChassisControl(&chassis_cmd_recv, &safety_result)) {
+    HoldChassisOutputs();
     goto feedback_only;
   }
 
@@ -778,6 +959,16 @@ void ChassisTask() {
   // EstimateSpeed();
 
 feedback_only:
+  ApplyChassisSafetyFeedback(&safety_result);
+  LogChassisSafetyTransition(&safety_result, &safety_input);
+
+  // 双板摘要链路回传底盘实际角速度，统一使用国际标准量纲 rad/s。
+  chassis_feedback_data.real_wz = 0.0f;
+#ifdef CHASSIS_BOARD
+  if (Chassis_IMU_data != NULL) {
+    chassis_feedback_data.real_wz = Chassis_IMU_data->Gyro[2];
+  }
+#endif
   chassis_feedback_data.referee_online = referee_online;
   if (referee_online && referee_data != NULL) {
     chassis_feedback_data.chassis_power_limit =
@@ -813,11 +1004,13 @@ feedback_only:
 
   SyncGeneratedUIState(comm_online, cap_online, ui_cap_energy);
 
-  uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
   if ((now_ms - chassis_last_telemetry_ms) >= CHASSIS_TELEMETRY_PERIOD_MS) {
-    LOGINFO("[chassis-link] referee=%u comm=%u power_mode=%d heat=%u",
-            referee_online, comm_online, chassis_cmd_recv.chassis_speed_buff,
-            chassis_feedback_data.rest_heat);
+    LOGINFO("[chassis-link] referee=%u comm=%u safety=0x%02X reason=%u wheel=0x%02X "
+            "power_mode=%d heat=%u",
+            referee_online, comm_online,
+            chassis_feedback_data.chassis_safety_status,
+            safety_result.local_inhibit_reason, safety_input.wheel_online_mask,
+            chassis_cmd_recv.chassis_speed_buff, chassis_feedback_data.rest_heat);
     chassis_last_telemetry_ms = now_ms;
   }
 

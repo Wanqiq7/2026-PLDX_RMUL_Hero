@@ -135,8 +135,18 @@ typedef struct {
   Cmd_Input_Source_e source;
 } Cmd_Input_Data_s;
 
+typedef struct {
+  uint32_t dwt_cnt;
+  uint8_t dt_synced;
+  uint8_t mouse_left_pressed_last;
+  uint8_t mouse_right_pressed_last;
+  float yaw_rate_cmd_rad_s;
+  float pitch_rate_cmd_rad_s;
+} Manual_Aim_Input_State_s;
+
 static Cmd_Input_Data_s cmd_input_active;
 static Cmd_Input_Source_e cmd_input_source = CMD_INPUT_SOURCE_NONE;
+static Manual_Aim_Input_State_s manual_aim_input_state;
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
@@ -223,6 +233,8 @@ static void ResetChassisFetchDataSafe(void) {
   chassis_fetch_data.barrel_heat_limit = 0;
   chassis_fetch_data.barrel_cooling_value = 0U;
   chassis_fetch_data.bullet_speed_limit = 0.0f;
+  chassis_fetch_data.real_wz = 0.0f;
+  chassis_fetch_data.chassis_safety_status = CHASSIS_SAFETY_STATUS_NONE;
 }
 
 static void ResetCmdInputActive(void) {
@@ -623,6 +635,8 @@ static void UpdateChassisFetchDataFromCan(void) {
         chassis_feed_fast_recv.barrel_cooling_value;
     chassis_fetch_data.bullet_speed_limit =
         chassis_feed_fast_recv.bullet_speed_limit;
+    chassis_fetch_data.real_wz = chassis_feed_fast_recv.real_wz;
+    chassis_fetch_data.chassis_safety_status = chassis_feed_fast_recv.chassis_safety_status;
   } else {
     const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
     ResetChassisFetchDataSafe();
@@ -705,11 +719,90 @@ static void SendChassisCommandCanIfDue(void) {
 #endif
 }
 
+static void ClearManualAimRateFeedforward(void) {
+  gimbal_cmd_send.manual_yaw_rate_ff_rad_s = 0.0f;
+  gimbal_cmd_send.manual_pitch_rate_ff_rad_s = 0.0f;
+}
+
+static void ResetManualAimInputState(uint8_t preserve_right_button_state) {
+  const uint8_t mouse_right_pressed_last =
+      preserve_right_button_state
+          ? manual_aim_input_state.mouse_right_pressed_last
+          : 0U;
+
+  memset(&manual_aim_input_state, 0, sizeof(manual_aim_input_state));
+  manual_aim_input_state.mouse_right_pressed_last = mouse_right_pressed_last;
+  ClearManualAimRateFeedforward();
+}
+
+static void SyncManualAimReferenceToFeedback(void) {
+  gimbal_cmd_send.yaw = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle_rad;
+  gimbal_cmd_send.pitch = gimbal_fetch_data.gimbal_imu_data.Pitch_rad;
+  LIMIT_PITCH_RAD(gimbal_cmd_send.pitch);
+}
+
+static float ApplyManualAimRateDeadband(float value) {
+  if (fabsf(value) < MANUAL_RATE_INPUT_DEADBAND) {
+    return 0.0f;
+  }
+  return value;
+}
+
+static float UpdateManualAimControlDt(void) {
+  float dt = 0.0f;
+
+  if (!manual_aim_input_state.dt_synced) {
+    DWT_GetDeltaT(&manual_aim_input_state.dwt_cnt);
+    manual_aim_input_state.dt_synced = 1U;
+    dt = 0.005f;
+  } else {
+    dt = DWT_GetDeltaT(&manual_aim_input_state.dwt_cnt);
+    dt = float_constrain(dt, 0.001f, 0.02f);
+  }
+
+  return dt;
+}
+
+static void UpdateManualAimRefFromMouse(float dt) {
+  float yaw_rate_cmd_norm =
+      float_constrain((float)cmd_input_active.mouse.x / MANUAL_MOUSE_AXIS_SCALE,
+                      -1.0f, 1.0f);
+  float pitch_rate_cmd_norm =
+      float_constrain((float)cmd_input_active.mouse.y / MANUAL_MOUSE_AXIS_SCALE,
+                      -1.0f, 1.0f);
+  float yaw_rate_cmd_rad_s = 0.0f;
+  float pitch_rate_cmd_rad_s = 0.0f;
+
+  yaw_rate_cmd_norm = ApplyManualAimRateDeadband(yaw_rate_cmd_norm);
+  pitch_rate_cmd_norm = ApplyManualAimRateDeadband(pitch_rate_cmd_norm);
+
+  manual_aim_input_state.yaw_rate_cmd_rad_s = LowPassFilter_Float(
+      yaw_rate_cmd_norm * MANUAL_YAW_RATE_MAX_RAD_S, 0.85f,
+      &manual_aim_input_state.yaw_rate_cmd_rad_s);
+  manual_aim_input_state.pitch_rate_cmd_rad_s = LowPassFilter_Float(
+      pitch_rate_cmd_norm * MANUAL_PITCH_RATE_MAX_RAD_S, 0.80f,
+      &manual_aim_input_state.pitch_rate_cmd_rad_s);
+
+  yaw_rate_cmd_rad_s = manual_aim_input_state.yaw_rate_cmd_rad_s;
+  pitch_rate_cmd_rad_s = manual_aim_input_state.pitch_rate_cmd_rad_s;
+
+  gimbal_cmd_send.yaw += yaw_rate_cmd_rad_s * dt;
+  gimbal_cmd_send.pitch += pitch_rate_cmd_rad_s * dt;
+  LIMIT_PITCH_RAD(gimbal_cmd_send.pitch);
+
+  gimbal_cmd_send.manual_yaw_rate_ff_rad_s =
+      yaw_rate_cmd_rad_s * MANUAL_YAW_RATE_FF_GAIN;
+  gimbal_cmd_send.manual_pitch_rate_ff_rad_s =
+      pitch_rate_cmd_rad_s * MANUAL_PITCH_RATE_FF_GAIN;
+}
+
 static void ApplyRobotStopOutputs(void) {
   robot_state = ROBOT_STOP;
   cmd_force_safe_fire = 1U;
 
   gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+  gimbal_cmd_send.chassis_rotate_wz = 0.0f;
+  ResetManualAimInputState(0U);
 
   chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
   chassis_cmd_send.vx = 0.0f;
@@ -744,6 +837,14 @@ static void ApplyRobotStopOutputs(void) {
 static void UpdateRobotSafetyState(void) {
   uint8_t safe_hold_active = 0U;
   const uint8_t input_online = cmd_input_active.online;
+  const uint8_t chassis_dead =
+      (chassis_fetch_data.chassis_safety_status & CHASSIS_SAFETY_STATUS_DEAD)
+          ? 1U
+          : 0U;
+  const uint8_t chassis_ready =
+      (chassis_fetch_data.chassis_safety_status & CHASSIS_SAFETY_STATUS_READY)
+          ? 1U
+          : 0U;
   const uint8_t vtm_pause_toggle =
       (cmd_input_source == CMD_INPUT_SOURCE_VTM && cmd_input_active.pause_pressed &&
        !cmd_vtm_pause_prev)
@@ -767,6 +868,17 @@ static void UpdateRobotSafetyState(void) {
   } else if (safe_hold_active) {
     if (robot_state != ROBOT_STOP) {
       LOGWARNING("[CMD] safe hold active, force robot to STOP.");
+    }
+    robot_state = ROBOT_STOP;
+  } else if (chassis_dead) {
+    if (robot_state != ROBOT_STOP) {
+      LOGWARNING("[CMD] chassis reported robot dead, force robot to STOP.");
+    }
+    robot_state = ROBOT_STOP;
+  } else if (!chassis_ready) {
+    if (robot_state != ROBOT_STOP) {
+      LOGWARNING(
+          "[CMD] chassis not ready, hold robot STOP until wheels recover.");
     }
     robot_state = ROBOT_STOP;
   } else if (cmd_input_source == CMD_INPUT_SOURCE_VTM) {
@@ -879,6 +991,8 @@ void RobotCMDInit() {
 
   gimbal_cmd_send.yaw = 0.0f;   // Yaw初始化为0弧度
   gimbal_cmd_send.pitch = 0.0f; // Pitch初始化为0弧度
+  gimbal_cmd_send.chassis_rotate_wz = 0.0f;
+  ResetManualAimInputState(0U);
 
   // 初始化发射模块控制指令
   shoot_cmd_send.shoot_mode = SHOOT_OFF;                  // 默认安全停射
@@ -1024,6 +1138,7 @@ static void CalcGimbalChassisAngle(void) {
  *
  */
 static void RemoteControlSet() {
+  ResetManualAimInputState(0U);
   // 遥控器模式固定为额定功率档，避免与键鼠档位残留互相干扰
   chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
   // 左侧开关状态为[下],底盘跟随云台
@@ -1109,23 +1224,9 @@ static void RemoteControlSet() {
 
 static void MouseKeySet() {
   float target_vx, target_vy;
-  static uint32_t keyboard_ramp_dwt_cnt = 0U;
-  static uint8_t keyboard_ramp_dt_synced = 0U;
   static loader_mode_e mouse_pulse_load_mode = LOAD_STOP;
   static uint32_t mouse_pulse_start_ms = 0U;
-  float dt = 0.0f;
-
-  /* 键鼠斜坡规划使用真实控制周期，避免手写固定dt导致参数与实际调度失配。
-   * 首次调用只同步时间戳，不使用异常大的首帧dt。
-   * 同时对dt做上下限保护，避免断点/卡顿后一次性跳变过大。 */
-  if (!keyboard_ramp_dt_synced) {
-    DWT_GetDeltaT(&keyboard_ramp_dwt_cnt);
-    keyboard_ramp_dt_synced = 1U;
-    dt = 0.005f;
-  } else {
-    dt = DWT_GetDeltaT(&keyboard_ramp_dwt_cnt);
-    dt = float_constrain(dt, 0.001f, 0.02f);
-  }
+  const float dt = UpdateManualAimControlDt();
 
   // 添加底盘键盘控制滤波静态变量
   static float vx_kb_filtered = 0.0f;
@@ -1156,29 +1257,6 @@ static void MouseKeySet() {
                KEYBOARD_RAMP_DECEL, KEYBOARD_RAMP_BRAKE_DECEL, dt);
   chassis_cmd_send.vx = keyboard_vx_cmd_planned;
   chassis_cmd_send.vy = keyboard_vy_cmd_planned;
-
-  // ✅ 添加鼠标控制滤波静态变量
-  static float mouse_yaw_increment = 0.0f;
-  static float mouse_pitch_increment = 0.0f;
-
-  // 计算原始鼠标增量
-  // Yaw: 角度 → 弧度（LQR需要弧度制）
-  float raw_mouse_yaw = (float)cmd_input_active.mouse.x / 660.0f;
-  // Pitch: 鼠标输入同样归一化为弧度刻度
-  float raw_mouse_pitch = (float)cmd_input_active.mouse.y / 660.0f;
-
-  // ✅ 为鼠标控制添加低通滤波
-  // 鼠标DPI通常在400-1600之间，会产生高频噪声，需要滤波
-  // Yaw: α=0.85，截止频率约62.8Hz，保持瞄准精度
-  // Pitch: α=0.80，截止频率约51Hz，避免垂直抖动
-  mouse_yaw_increment =
-      LowPassFilter_Float(raw_mouse_yaw, 0.85f, &mouse_yaw_increment);
-  mouse_pitch_increment =
-      LowPassFilter_Float(raw_mouse_pitch, 0.80f, &mouse_pitch_increment);
-
-  gimbal_cmd_send.yaw += mouse_yaw_increment;
-  gimbal_cmd_send.pitch += mouse_pitch_increment;
-  LIMIT_PITCH_RAD(gimbal_cmd_send.pitch); // Pitch 角度限位
 
   // 键鼠路径固定使用单一 12m/s 弹速，不再通过键位切换档位
   shoot_cmd_send.bullet_speed = SHOOT_FIXED_BULLET_SPEED;
@@ -1261,14 +1339,34 @@ static void MouseKeySet() {
 
   // 鼠标右键长按自瞄：按下接管，松开释放
   // 右键优先级高于左键，进入自瞄后由视觉决定拨弹时机
+  const uint8_t mouse_right_pressed = cmd_input_active.mouse.press_r ? 1U : 0U;
   const uint8_t mouse_left_pressed = cmd_input_active.mouse.press_l ? 1U : 0U;
-  static uint8_t mouse_left_pressed_last = 0U;
   const uint8_t mouse_left_rising =
-      (mouse_left_pressed && !mouse_left_pressed_last) ? 1U : 0U;
+      (mouse_left_pressed && !manual_aim_input_state.mouse_left_pressed_last)
+          ? 1U
+          : 0U;
+  const uint8_t mouse_right_rising =
+      (mouse_right_pressed && !manual_aim_input_state.mouse_right_pressed_last)
+          ? 1U
+          : 0U;
+  const uint8_t mouse_right_falling =
+      (!mouse_right_pressed && manual_aim_input_state.mouse_right_pressed_last)
+          ? 1U
+          : 0U;
   const uint32_t now_ms = (uint32_t)DWT_GetTimeline_ms();
-  mouse_left_pressed_last = mouse_left_pressed;
+  manual_aim_input_state.mouse_left_pressed_last = mouse_left_pressed;
 
-  if (cmd_input_active.mouse.press_r) {
+  if (mouse_right_rising || mouse_right_falling) {
+    SyncManualAimReferenceToFeedback();
+    ResetManualAimInputState(1U);
+  }
+
+  ClearManualAimRateFeedforward();
+  if (!mouse_right_pressed && !mouse_right_falling) {
+    UpdateManualAimRefFromMouse(dt);
+  }
+
+  if (mouse_right_pressed) {
     mouse_pulse_load_mode = LOAD_STOP;
     vision_cmd_send.vision_mode = VISION_MODE_AUTO_AIM;
     vision_cmd_send.allow_auto_fire = 1; // 自瞄时由视觉控制是否发射
@@ -1306,6 +1404,8 @@ static void MouseKeySet() {
 
     break;
   }
+
+  manual_aim_input_state.mouse_right_pressed_last = mouse_right_pressed;
 }
 
 static void VTMControlSet() {
@@ -1319,6 +1419,8 @@ static void VTMControlSet() {
     MouseKeySet();
     return;
   }
+
+  ResetManualAimInputState(0U);
 
   chassis_cmd_send.chassis_speed_buff = CHASSIS_POWER_LIMIT_PERCENT;
 
@@ -1424,6 +1526,7 @@ void RobotCMDTask() {
   // BMI088Acquire(bmi088_test,&bmi088_data) ;
   // 底盘状态只通过跨板 CAN 摘要链路回传
   UpdateChassisFetchDataFromCan();
+  gimbal_cmd_send.chassis_rotate_wz = chassis_fetch_data.real_wz;
   SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
   SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
   SubGetMessage(vision_data_sub, &vision_data_recv); // 获取视觉处理数据

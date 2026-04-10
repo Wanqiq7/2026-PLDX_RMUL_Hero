@@ -26,7 +26,7 @@ function Assert-NoPattern {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $robotDef = Join-Path $repoRoot 'Gimbal\application\robot_def.h'
-$visionCtrlHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\vision_control.h'
+$visionCtrlHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\controllers\domain\vision_control.h'
 $visionApp = Join-Path $repoRoot 'Gimbal\application\vision\vision.c'
 $gimbalTask = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.c'
 
@@ -45,6 +45,6 @@ Assert-Pattern $visionApp 'vision_upload_data\.yaw_ref_rad' 'Vision app is not p
 
 Assert-NoPattern $gimbalTask 'DJIMotorSetRawRef\(yaw_motor, vision_data_recv\.yaw_current_cmd\)' 'AutoAim Yaw still bypasses the closed-loop mainline.'
 Assert-Pattern $gimbalTask 'yaw_ref_rad = vision_data_recv\.yaw_ref_rad' 'AutoAim Yaw is not consuming vision yaw reference.'
-Assert-Pattern $gimbalTask 'DJIMotorSetEffort\(yaw_motor, &yaw_effort\)' 'AutoAim Yaw is not routed through SetEffort.'
+Assert-Pattern $gimbalTask 'DJIMotorSetEffort\(yaw_motor, ?&?yaw_effort\)' 'AutoAim Yaw is not routed through SetEffort.'
 
 Write-Output 'PASS: autoaim reference mainline regression checks'

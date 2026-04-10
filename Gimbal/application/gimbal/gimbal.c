@@ -87,8 +87,10 @@ static Gimbal_Upload_Data_s gimbal_feedback_data;
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;
 static Vision_Upload_Data_s vision_data_recv;
 static Gimbal_Ref_Manager_s gimbal_ref_manager;
-static float yaw_vision_rate_feedforward_rad_s = 0.0f;
-static float pitch_vision_rate_feedforward_rad_s = 0.0f;
+static float yaw_ref_rate_feedforward_rad_s = 0.0f;
+static float yaw_chassis_rate_feedforward_rad_s = 0.0f;
+static float yaw_total_rate_feedforward_rad_s = 0.0f;
+static float pitch_ref_rate_feedforward_rad_s = 0.0f;
 
 static void BuildGimbalRefInput(Gimbal_Ref_Input_s *ref_input) {
   if (ref_input == NULL) {
@@ -98,6 +100,8 @@ static void BuildGimbalRefInput(Gimbal_Ref_Input_s *ref_input) {
   memset(ref_input, 0, sizeof(*ref_input));
   ref_input->manual_yaw_ref_rad = gimbal_cmd_recv.yaw;
   ref_input->manual_pitch_ref_rad = gimbal_cmd_recv.pitch;
+  ref_input->manual_yaw_rate_ff_rad_s = gimbal_cmd_recv.manual_yaw_rate_ff_rad_s;
+  ref_input->manual_pitch_rate_ff_rad_s = gimbal_cmd_recv.manual_pitch_rate_ff_rad_s;
   ref_input->pitch_min_limit_rad = PITCH_MIN_ANGLE * DEG_TO_RAD;
   ref_input->pitch_max_limit_rad = PITCH_MAX_ANGLE * DEG_TO_RAD;
   ref_input->autoaim_mode =
@@ -107,6 +111,24 @@ static void BuildGimbalRefInput(Gimbal_Ref_Input_s *ref_input) {
   ref_input->vision_pitch_ref_rad = vision_data_recv.pitch_ref_rad;
   ref_input->vision_yaw_rate_ff_rad_s = vision_data_recv.yaw_rate_ff_rad_s;
   ref_input->vision_pitch_rate_ff_rad_s = vision_data_recv.pitch_rate_ff_rad_s;
+}
+
+static void UpdateYawRateFeedforward(const Gimbal_Ref_Output_s *ref_output) {
+  if (ref_output == NULL) {
+    yaw_ref_rate_feedforward_rad_s = 0.0f;
+    yaw_chassis_rate_feedforward_rad_s = 0.0f;
+    yaw_total_rate_feedforward_rad_s = 0.0f;
+    pitch_ref_rate_feedforward_rad_s = 0.0f;
+    return;
+  }
+
+  yaw_ref_rate_feedforward_rad_s = ref_output->yaw_rate_ff_rad_s;
+  // Yaw 总速度前馈由参考层输出前馈与底盘自旋反向补偿两部分组成，
+  // 统一使用 rad/s。
+  yaw_chassis_rate_feedforward_rad_s = -gimbal_cmd_recv.chassis_rotate_wz;
+  yaw_total_rate_feedforward_rad_s =
+      yaw_ref_rate_feedforward_rad_s + yaw_chassis_rate_feedforward_rad_s;
+  pitch_ref_rate_feedforward_rad_s = ref_output->pitch_rate_ff_rad_s;
 }
 
 static void RunYawMainline(Controller_Type_e controller_type,
@@ -191,7 +213,7 @@ void GimbalInit() {
                   {
                       .sample_period = ROBOT_CTRL_PERIOD_S,
                   },
-              .speed_feedforward_ptr = &yaw_vision_rate_feedforward_rad_s,
+              .speed_feedforward_ptr = &yaw_total_rate_feedforward_rad_s,
               .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
           },
@@ -250,7 +272,7 @@ void GimbalInit() {
                       .Improve = PID_Integral_Limit,
                       .IntegralLimit = 1.5f,
                   },
-              .speed_feedforward_ptr = &pitch_vision_rate_feedforward_rad_s,
+              .speed_feedforward_ptr = &pitch_ref_rate_feedforward_rad_s,
               .other_angle_feedback_ptr = &gimba_IMU_data->Pitch_rad,
               .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[0],
           },
@@ -294,7 +316,7 @@ void GimbalInit() {
   yaw_motor = DJIMotorInit(&yaw_config);
   pitch_motor = DMMotorInit(&pitch_config);
   pitch_motor->external_speed_feedforward_ptr =
-      &pitch_vision_rate_feedforward_rad_s;
+      &pitch_ref_rate_feedforward_rad_s;
   DMMotorSetMode(pitch_motor, DM_MODE_MIT);
   DMMotorEnable(pitch_motor);
   DMMotorControlInit();
@@ -325,8 +347,7 @@ void GimbalTask() {
   BuildGimbalRefInput(&ref_input);
   GimbalRefManagerStep(&gimbal_ref_manager, &ref_input, &ref_output);
 
-  yaw_vision_rate_feedforward_rad_s = ref_output.yaw_rate_ff_rad_s;
-  pitch_vision_rate_feedforward_rad_s = ref_output.pitch_rate_ff_rad_s;
+  UpdateYawRateFeedforward(&ref_output);
 
   switch (gimbal_cmd_recv.gimbal_mode) {
   case GIMBAL_ZERO_FORCE: {

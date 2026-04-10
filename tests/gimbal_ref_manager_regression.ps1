@@ -14,9 +14,9 @@ function Assert-Pattern {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $gimbalTask = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.c'
-$refMgrHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\gimbal_ref_manager.h'
-$refMgrSource = Join-Path $repoRoot 'Gimbal\modules\algorithm\gimbal_ref_manager.c'
-$refMgrDoc = Join-Path $repoRoot 'Gimbal\modules\algorithm\gimbal_ref_manager.md'
+$refMgrHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\controllers\reference\gimbal_ref_manager.h'
+$refMgrSource = Join-Path $repoRoot 'Gimbal\modules\algorithm\controllers\reference\gimbal_ref_manager.c'
+$refMgrDoc = Join-Path $repoRoot 'Gimbal\modules\algorithm\controllers\reference\gimbal_ref_manager.md'
 
 Assert-Pattern $refMgrHeader 'Gimbal_Ref_Output_s' 'Missing Gimbal ref output definition.'
 Assert-Pattern $refMgrHeader 'GimbalRefManagerStep' 'Missing GimbalRefManagerStep declaration.'

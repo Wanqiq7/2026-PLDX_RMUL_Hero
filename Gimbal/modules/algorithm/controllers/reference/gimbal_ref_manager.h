@@ -13,6 +13,8 @@
 typedef struct {
   float manual_yaw_ref_rad;
   float manual_pitch_ref_rad;
+  float manual_yaw_rate_ff_rad_s;   // ff = feedforward，手瞄 Yaw 速度前馈
+  float manual_pitch_rate_ff_rad_s; // ff = feedforward，手瞄 Pitch 速度前馈
   float pitch_min_limit_rad;
   float pitch_max_limit_rad;
   uint8_t autoaim_mode;

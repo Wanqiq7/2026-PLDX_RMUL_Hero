@@ -31,6 +31,8 @@ static void BuildChassisFeedbackCanPackets(
   chassis_feed_fast_send.barrel_cooling_value =
       feedback_data->barrel_cooling_value;
   chassis_feed_fast_send.bullet_speed_limit = feedback_data->bullet_speed_limit;
+  chassis_feed_fast_send.real_wz = feedback_data->real_wz;
+  chassis_feed_fast_send.chassis_safety_status = feedback_data->chassis_safety_status;
 
   chassis_feed_state_send.bullet_speed = feedback_data->bullet_speed;
   chassis_feed_state_send.chassis_power_limit =

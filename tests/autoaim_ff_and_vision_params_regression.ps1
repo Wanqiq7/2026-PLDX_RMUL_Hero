@@ -26,7 +26,7 @@ function Assert-NoPattern {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $gimbalTask = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.c'
-$visionCtrlHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\vision_control.h'
+$visionCtrlHeader = Join-Path $repoRoot 'Gimbal\modules\algorithm\controllers\domain\vision_control.h'
 $visionApp = Join-Path $repoRoot 'Gimbal\application\vision\vision.c'
 $gimbalDoc = Join-Path $repoRoot 'Gimbal\application\gimbal\gimbal.md'
 

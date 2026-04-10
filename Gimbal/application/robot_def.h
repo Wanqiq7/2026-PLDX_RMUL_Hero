@@ -103,6 +103,14 @@
 
 // dt=5ms 时，每周期约变化 0.02，换向过零约需 0.25s
 #define KEYBOARD_RAMP_BRAKE_DECEL 4.0f
+
+// 键鼠手瞄输入模型参数
+#define MANUAL_MOUSE_AXIS_SCALE 660.0f
+#define MANUAL_RATE_INPUT_DEADBAND 0.02f
+#define MANUAL_YAW_RATE_MAX_RAD_S 6.0f
+#define MANUAL_PITCH_RATE_MAX_RAD_S 4.0f
+#define MANUAL_YAW_RATE_FF_GAIN 0.35f
+#define MANUAL_PITCH_RATE_FF_GAIN 0.20f
 /**
  * @brief M3508 电机扭矩到 CAN 指令值的换算系数
  * @note C620 电调 -20A~20A 对应 -16384~16384
@@ -154,6 +162,12 @@ typedef enum {
   CHASSIS_NO_FOLLOW,      // 不跟随，允许全向平移
   CHASSIS_FOLLOW_GIMBAL_YAW, // 跟随模式，底盘叠加角度环控制
 } chassis_mode_e;
+
+typedef enum {
+  CHASSIS_SAFETY_STATUS_NONE = 0x00U,
+  CHASSIS_SAFETY_STATUS_DEAD = 0x01U,
+  CHASSIS_SAFETY_STATUS_READY = 0x02U,
+} chassis_safety_status_e;
 
 // 云台模式设置
 typedef enum {
@@ -228,7 +242,9 @@ typedef struct {
 typedef struct { // 云台角度控制
   float yaw;
   float pitch;
-  float chassis_rotate_wz;
+  float chassis_rotate_wz; // 底盘实际角速度 [rad/s]
+  float manual_yaw_rate_ff_rad_s;   // ff = feedforward，手瞄Yaw速度前馈 [rad/s]
+  float manual_pitch_rate_ff_rad_s; // ff = feedforward，手瞄Pitch速度前馈 [rad/s]
 
   gimbal_mode_e gimbal_mode;
 } Gimbal_Ctrl_Cmd_s;
@@ -268,7 +284,8 @@ typedef struct {
   // 后续增加底盘的真实速度
   // float real_vx;
   // float real_vy;
-  // float real_wz;
+  float real_wz; // 底盘实际角速度 [rad/s]
+  uint8_t chassis_safety_status; // bit0-阵亡 bit1-底盘ready
 
   uint8_t referee_online;      // 裁判系统在线标志(1:在线,0:离线)
   uint8_t rest_heat;           // 剩余枪口热量
@@ -314,6 +331,8 @@ typedef struct {
   uint16_t barrel_heat_limit;
   uint16_t barrel_cooling_value;
   float bullet_speed_limit;
+  float real_wz; // 底盘实际角速度 [rad/s]
+  uint8_t chassis_safety_status;
 } Chassis_Feed_Fast_Pkt_s;
 
 typedef struct {
